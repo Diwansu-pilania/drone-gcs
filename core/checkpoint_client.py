@@ -149,9 +149,40 @@ def checkpoint_position(checkpoint):
     for key in ("location", "position", "coords", "coordinates", "point"):
         nested = checkpoint.get(key)
         if nested is not None and nested is not checkpoint:
-            return checkpoint_position(nested)
+            found = checkpoint_position(nested)
+            if found != (None, None):
+                return found
+
+    # Last resort: any field whose NAME says latitude/longitude, so a spelling
+    # not listed above (checkpoint_lat, latitude_deg, gps_lon, ...) still
+    # plots instead of being silently dropped.
+    lat_key = _first_key_matching(checkpoint, ("lat",))
+    lon_key = _first_key_matching(checkpoint, ("lon", "lng"))
+    if lat_key and lon_key:
+        try:
+            return float(checkpoint[lat_key]), float(checkpoint[lon_key])
+        except (TypeError, ValueError):
+            return None, None
 
     return None, None
+
+
+def _first_key_matching(mapping, fragments):
+    """Return the first key containing one of ``fragments``, with a number."""
+    for key, value in mapping.items():
+        if not isinstance(key, str):
+            continue
+        lowered = key.lower()
+        if not any(fragment in lowered for fragment in fragments):
+            continue
+        if isinstance(value, bool) or not isinstance(value, (int, float, str)):
+            continue
+        try:
+            float(value)
+        except (TypeError, ValueError):
+            continue
+        return key
+    return None
 
 
 def checkpoint_name(checkpoint):
@@ -162,6 +193,16 @@ def checkpoint_name(checkpoint):
         value = checkpoint.get(key)
         if value is not None and value != "":
             return str(value)
+
+    # A spelling not listed above (site_name, cp_label, ...) still beats
+    # showing every checkpoint as "Checkpoint".
+    for key, value in checkpoint.items():
+        if not isinstance(key, str) or value in (None, ""):
+            continue
+        lowered = key.lower()
+        if any(f in lowered for f in ("name", "title", "label")):
+            if isinstance(value, (str, int, float)):
+                return str(value)
     return "Checkpoint"
 
 
