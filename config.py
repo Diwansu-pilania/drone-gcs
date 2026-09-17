@@ -198,3 +198,14 @@ DRONE_SEARCH_RADIUS_M = 100000.0
 
 # Most rows to bring back from one lookup.
 DRONE_SEARCH_LIMIT = 50
+
+# Name recorded when a response is authorised from this GCS. The button only
+# records WHO authorised it, in this window — it sends nothing and dispatches
+# nothing. Falls back to the operating-system user; set it explicitly on a
+# shared console, where the machine's login is not a person.
+import getpass as _getpass  # noqa: E402  (kept beside the setting it feeds)
+
+try:
+    OPERATOR_NAME = _getpass.getuser()
+except Exception:
+    OPERATOR_NAME = "unknown-operator"
