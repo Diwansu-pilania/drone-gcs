@@ -15,6 +15,10 @@
         .detection-popup .info { margin-top: 10px; font-size: 13px; line-height: 1.6; }
         .detection-popup .info strong { color: #F44336; font-size: 14px; }
         .detection-popup .info-row { margin: 3px 0; }
+        .checkpoint-popup { max-width: 320px; font-size: 13px; line-height: 1.6; }
+        .checkpoint-popup strong { color: #00897B; font-size: 14px; }
+        .checkpoint-popup .info-row { margin: 3px 0; }
+        .checkpoint-popup .muted { color: #666; font-size: 12px; }
     </style>
 </head>
 <body>
@@ -234,6 +238,7 @@
             var bbox = detectionData.bbox;
             var syncTimeDiff = detectionData.sync_time_diff;
             var groundDistance = detectionData.ground_distance;
+            var positionSource = detectionData.position_source;
             var droneLat = detectionData.drone_lat;
             var droneLon = detectionData.drone_lon;
             var droneAlt = detectionData.drone_alt;
@@ -286,7 +291,12 @@
             popupContent += '<div class="info-row">📍 Object: ' + lat.toFixed(6) + ', ' + lon.toFixed(6) + '</div>';
 
             if (droneLat != null && droneLon != null) {
-                popupContent += '<div class="info-row">🚁 Drone: ' + droneLat.toFixed(6) + ', ' + droneLon.toFixed(6) + '</div>';
+                // Say whose position this was projected from: with MAVLink
+                // down it is the map's default centre, so the result is an
+                // estimate and should not read as a surveyed fix.
+                var originLabel = positionSource === 'default_center'
+                    ? 'Default centre (no MAVLink fix)' : 'Drone';
+                popupContent += '<div class="info-row">🚁 ' + originLabel + ': ' + droneLat.toFixed(6) + ', ' + droneLon.toFixed(6) + '</div>';
             }
 
             if (droneAlt) {
@@ -336,6 +346,133 @@
             }
 
             detectionMarkers[key] = {marker: marker, line: projectionLine};
+        };
+
+        // --- Nearby checkpoints ------------------------------------------
+        // Checkpoint sets returned by the external /nearby service, keyed by
+        // the detection they were looked up for, so a re-query replaces a set
+        // instead of leaving the previous markers behind.
+        var checkpointLayers = {};
+
+        // Checkpoint data comes from an external service, so never trust it in
+        // markup — escape before inserting into a popup.
+        function escapeHtml(value) {
+            if (value == null) { return ''; }
+            return String(value)
+                .replace(/&/g, '&amp;').replace(/</g, '&lt;')
+                .replace(/>/g, '&gt;').replace(/"/g, '&quot;')
+                .replace(/'/g, '&#39;');
+        }
+
+        function removeCheckpointLayers(entry) {
+            if (!entry) { return; }
+            if (entry.circle && map.hasLayer(entry.circle)) {
+                map.removeLayer(entry.circle);
+            }
+            (entry.markers || []).forEach(function(m) {
+                if (map.hasLayer(m)) { map.removeLayer(m); }
+            });
+        }
+
+        // Pull a latitude/longitude out of a checkpoint however the service
+        // happens to name them.
+        function checkpointLatLng(cp) {
+            var lat = cp.latitude != null ? cp.latitude
+                    : (cp.lat != null ? cp.lat : null);
+            var lon = cp.longitude != null ? cp.longitude
+                    : (cp.lon != null ? cp.lon
+                    : (cp.lng != null ? cp.lng : null));
+            if (lat == null || lon == null) { return null; }
+            lat = Number(lat); lon = Number(lon);
+            if (isNaN(lat) || isNaN(lon)) { return null; }
+            return [lat, lon];
+        }
+
+        // Draw one detection's checkpoint set: the search radius as a circle,
+        // plus a marker per checkpoint.
+        window.addCheckpoints = function(data) {
+            if (!data) { return; }
+
+            var center = data.center || {};
+            var lat = Number(center.latitude);
+            var lon = Number(center.longitude);
+            var radius = Number(data.radius_m);
+            if (isNaN(lat) || isNaN(lon)) { return; }
+
+            var key = String(data.key != null ? data.key : 'checkpoints');
+            removeCheckpointLayers(checkpointLayers[key]);
+
+            // The search area the radius came from (equipment max range).
+            var circle = null;
+            if (!isNaN(radius) && radius > 0) {
+                circle = L.circle([lat, lon], {
+                    radius: radius,
+                    color: '#00897B',
+                    weight: 2,
+                    opacity: 0.8,
+                    fillColor: '#00897B',
+                    fillOpacity: 0.07,
+                    dashArray: '6, 6'
+                }).addTo(map);
+
+                var rangeKm = (radius / 1000).toFixed(2);
+                circle.bindTooltip(
+                    escapeHtml(data.equipment_name || data.object_class ||
+                               'equipment') + ' range: ' + rangeKm + ' km',
+                    {sticky: true});
+            }
+
+            var checkpointIcon = L.divIcon({
+                className: 'checkpoint-marker',
+                html: '<div style="background: #00897B; width: 14px; height: 14px; border: 2px solid white; box-shadow: 0 0 4px rgba(0,0,0,0.5);"></div>',
+                iconSize: [14, 14],
+                iconAnchor: [7, 7]
+            });
+
+            var markers = [];
+            var checkpoints = Array.isArray(data.checkpoints) ? data.checkpoints : [];
+
+            checkpoints.forEach(function(cp) {
+                if (!cp || typeof cp !== 'object') { return; }
+                var pos = checkpointLatLng(cp);
+                if (!pos) { return; }
+
+                var marker = L.marker(pos, {icon: checkpointIcon}).addTo(map);
+
+                var name = cp.name || cp.title || cp.checkpoint_name ||
+                           cp.id || 'Checkpoint';
+                var html = '<div class="checkpoint-popup">';
+                html += '<div class="info-row"><strong>🛡 ' +
+                        escapeHtml(name) + '</strong></div>';
+
+                // Whatever the service labels the separation, show it.
+                var away = cp.distance_m != null ? cp.distance_m
+                         : (cp.distance != null ? cp.distance : null);
+                if (away != null && !isNaN(Number(away))) {
+                    html += '<div class="info-row">📏 ' +
+                            Number(away).toFixed(0) + ' m from object</div>';
+                }
+                if (cp.type || cp.category) {
+                    html += '<div class="info-row">🏷 ' +
+                            escapeHtml(cp.type || cp.category) + '</div>';
+                }
+                html += '<div class="info-row muted">📍 ' +
+                        pos[0].toFixed(6) + ', ' + pos[1].toFixed(6) + '</div>';
+                html += '</div>';
+
+                marker.bindPopup(html);
+                markers.push(marker);
+            });
+
+            checkpointLayers[key] = {circle: circle, markers: markers};
+        };
+
+        // Remove every checkpoint circle and marker
+        window.clearCheckpoints = function() {
+            Object.keys(checkpointLayers).forEach(function(key) {
+                removeCheckpointLayers(checkpointLayers[key]);
+            });
+            checkpointLayers = {};
         };
 
         // Clear all detection markers

@@ -4,6 +4,40 @@ from core.detection_projection import project_detection_position
 from core.position_sync import find_drone_position_at_time
 
 
+def has_fix(latitude, longitude):
+    """Whether a position is a real fix.
+
+    (0, 0) is what MAVLink reports before it has one, so it counts as "no fix"
+    here exactly as it does in the map view.
+    """
+    if latitude is None or longitude is None:
+        return False
+    return bool(latitude or longitude)
+
+
+def default_map_position(settings=None):
+    """Return the (lat, lon) the map UI falls back to when there is no fix.
+
+    Reads ``OFFLINE_MAP_CENTER`` from config so the projection is anchored to
+    the very point the operator is already looking at while offline, rather
+    than a second hard-coded coordinate that could drift out of step with it.
+    ``settings`` may carry ``DEFAULT_DETECTION_CENTER`` to override it.
+    """
+    center = getattr(settings, "DEFAULT_DETECTION_CENTER", None)
+    if center is None:
+        try:
+            import config
+        except ImportError:
+            return None, None
+        center = (getattr(config, "OFFLINE_MAP_CENTER", None)
+                  or getattr(config, "DEFAULT_MAP_CENTER", None))
+
+    try:
+        return float(center[0]), float(center[1])
+    except (TypeError, ValueError, IndexError):
+        return None, None
+
+
 def positive_distance(detection):
     """Return a positive depth distance as float, otherwise ``None``."""
     depth = detection.get("depth")
@@ -44,6 +78,19 @@ def prepare_detection_for_map(detection, vehicle_state, settings):
             max_time_diff_sec=settings.MAX_SYNC_TIME_DIFF,
         )
 
+    # With MAVLink disconnected the flight path is empty, so there is nothing to
+    # sync against and a target whose depth has already arrived would stay off
+    # the map indefinitely. Anchor it to the map's default centre instead: the
+    # depth and bounding box still carry the object's bearing and range, so the
+    # projection stays meaningful relative to a known reference point. The
+    # position is tagged below so the map can show it as approximate.
+    position_source = "mavlink"
+    if distance_m is not None and not has_fix(drone_lat, drone_lon):
+        fallback_lat, fallback_lon = default_map_position(settings)
+        if fallback_lat is not None and fallback_lon is not None:
+            drone_lat, drone_lon, time_diff = fallback_lat, fallback_lon, None
+            position_source = "default_center"
+
     if drone_lat is not None and drone_lon is not None:
         if settings.ENABLE_PROJECTION and distance_m is not None:
             object_lat, object_lon, ground_dist = project_detection_position(
@@ -73,6 +120,7 @@ def prepare_detection_for_map(detection, vehicle_state, settings):
                     "drone_lat": drone_lat,
                     "drone_lon": drone_lon,
                     "drone_alt": vehicle_state.altitude,
+                    "position_source": position_source,
                 })
                 if settings.DEBUG_PROJECTION:
                     print(
@@ -90,10 +138,12 @@ def prepare_detection_for_map(detection, vehicle_state, settings):
                 "has_gps": True,
                 "altitude": vehicle_state.altitude,
                 "sync_time_diff": time_diff,
+                "position_source": position_source,
             })
 
     return {
         "should_map": bool(detection.get("has_gps")),
+        "position_source": detection.get("position_source"),
         "waiting_for_depth": (
             settings.ENABLE_PROJECTION
             and not sender_has_gps

@@ -267,6 +267,10 @@ class DetectionServer(QObject):
             dst["gps"] = src.get("gps")
         if src.get("altitude"):
             dst["altitude"] = src["altitude"]
+        # Only the POST that carries equipment_info sets it, so a later POST
+        # without it must not erase what the first one established.
+        if src.get("equipment_info") is not None:
+            dst["equipment_info"] = src["equipment_info"]
         if src.get("datetime"):
             dst["datetime"] = src["datetime"]
         if src.get("image_url") and not dst.get("image_url"):
@@ -302,6 +306,9 @@ class DetectionServer(QObject):
             "depth": depth,
             "distance_m": distance_m,
             "gps": data.get("gps"),
+            # Carried through verbatim: the UI derives the checkpoint search
+            # radius from equipment_info.max_range_km.
+            "equipment_info": data.get("equipment_info"),
             "timestamp": self._normalize_timestamp(data),
             "datetime": data.get("datetime"),
             "image_file": image_name,

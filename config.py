@@ -101,3 +101,22 @@ DETECTION_IMAGE_DIR = "detection_images"
 # and any gaps show a blank grid (path/markers still render).
 TILE_CACHE_DIR = "map_tiles"
 
+
+# --- Nearby checkpoint service ---------------------------------------------
+# The GCS asks an external service which checkpoints lie near a detected
+# object: GET <base>/nearby?latitude=..&longitude=..&radius_m=..
+#
+# The service runs on a Tailscale/LAN peer, so set this to that peer's address
+# (Tailscale IP or MagicDNS name), e.g. "http://100.101.102.103:8000" or
+# "http://my-peer.tail-scale.ts.net:8000". Leave it empty to switch the lookup
+# off — detections are still mapped, just without checkpoints.
+CHECKPOINT_API_BASE = ""
+
+# Seconds to wait for the checkpoint service before giving up. The request runs
+# off the Qt thread, so a slow peer delays checkpoints but never the UI.
+CHECKPOINT_API_TIMEOUT = 5.0
+
+# Search radius used when a detection carries no usable equipment_info
+# max_range_km. Normally the detector sends it and that value wins; this only
+# keeps the lookup working if the field is missing or unparseable.
+CHECKPOINT_DEFAULT_RADIUS_M = 5000.0

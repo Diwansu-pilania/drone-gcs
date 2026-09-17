@@ -2,7 +2,7 @@
 from PyQt6.QtWidgets import (QMainWindow, QWidget, QHBoxLayout, QVBoxLayout,
                               QSplitter, QDialog, QLabel, QComboBox, QLineEdit,
                               QPushButton, QFormLayout, QMessageBox, QToolBar)
-from PyQt6.QtCore import Qt, pyqtSlot, QTimer
+from PyQt6.QtCore import Qt, pyqtSignal, pyqtSlot, QTimer
 from PyQt6.QtGui import QAction
 import serial.tools.list_ports
 import threading
@@ -11,6 +11,10 @@ from core.vehicle_state import VehicleState
 from core.mavlink_thread import MAVLinkThread
 from core.detection_server import DetectionServer
 from core.detection_flow import prepare_detection_for_map
+from core.checkpoint_client import (checkpoints_from_response,
+                                    equipment_max_range_km,
+                                    fetch_nearby_checkpoints,
+                                    radius_from_equipment)
 from core.tile_server import TileCacheGroup
 from ui.map_widget import MapWidget
 from ui.telemetry_panel import TelemetryPanel
@@ -113,6 +117,10 @@ class ConnectionDialog(QDialog):
 class MainWindow(QMainWindow):
     """Main application window"""
 
+    # Emitted from the checkpoint worker thread so the markers are drawn on the
+    # Qt thread. Touching widgets straight from the worker would be unsafe.
+    checkpoints_ready = pyqtSignal(dict)
+
     def __init__(self):
         super().__init__()
         self.setWindowTitle("Drone GCS - Real-Time Dashboard")
@@ -122,6 +130,9 @@ class MainWindow(QMainWindow):
         self.vehicle_state = VehicleState()
         self.mavlink_thread = None
         self.detection_server = None
+
+        # Only say "checkpoint lookup is off" once, not on every detection.
+        self._checkpoint_hint_shown = False
 
         # Offline map tile cache (fetches when online, serves from disk when
         # not). Multi-layer: satellite imagery + label overlays + street map.
@@ -236,7 +247,9 @@ class MainWindow(QMainWindow):
 
     def _connect_signals(self):
         """Connect vehicle state signals for map updates"""
-        pass  # Map updates handled by timer
+        # Map updates from telemetry are handled by the timer; the checkpoint
+        # results arrive from a worker thread and are drawn here.
+        self.checkpoints_ready.connect(self._on_checkpoints_ready)
 
     def _show_connection_dialog(self):
         """Show connection dialog and connect"""
@@ -300,6 +313,9 @@ class MainWindow(QMainWindow):
         # mapped until the second POST supplies a positive depth distance.
         if result["should_map"]:
             self.map_widget.add_detection(detection)
+            # The object now has a position, so ask which checkpoints are
+            # within reach of it.
+            self._request_checkpoints(detection)
         # Add to detection panel (always)
         self.detection_panel.add_detection(detection)
 
@@ -310,8 +326,105 @@ class MainWindow(QMainWindow):
             suffix = " - depth error"
         elif result["waiting_for_depth"]:
             suffix = " - waiting for depth"
+        elif result.get("position_source") == "default_center":
+            # Be explicit that this one is anchored to the default centre
+            # rather than a real GPS fix.
+            suffix = " - no MAVLink fix, using default position"
         self.statusBar().showMessage(
             f"Detection: {obj_class} ({confidence*100:.0f}%){suffix}"
+        )
+
+    @staticmethod
+    def _detection_key(detection):
+        """Identity used to tie a checkpoint set to its detection.
+
+        Matches the key the map widget uses for detection markers, so the two
+        stay in step when a detection is updated and re-queried.
+        """
+        return (detection.get("image_file") or detection.get("id")
+                or detection.get("timestamp"))
+
+    def _request_checkpoints(self, detection):
+        """Ask the external service which checkpoints are near this object.
+
+        The search radius is the detected equipment's maximum range converted
+        from km to m, so the circle covers how far that equipment can reach.
+        The request runs on a worker thread: the peer is reachable over
+        Tailscale/LAN and a slow or absent one must not stall the UI.
+        """
+        api_base = getattr(config, "CHECKPOINT_API_BASE", "")
+        if not api_base:
+            if not self._checkpoint_hint_shown:
+                self._checkpoint_hint_shown = True
+                print("[checkpoints] Lookup is off - set CHECKPOINT_API_BASE "
+                      "in config.py to your Tailscale/LAN peer to enable it.")
+            return
+
+        latitude = detection.get("latitude")
+        longitude = detection.get("longitude")
+        if latitude is None or longitude is None:
+            return
+
+        default_radius = getattr(config, "CHECKPOINT_DEFAULT_RADIUS_M", 5000.0)
+        radius_m = radius_from_equipment(detection, default_radius)
+        used_equipment_range = equipment_max_range_km(detection) is not None
+        timeout = getattr(config, "CHECKPOINT_API_TIMEOUT", 5.0)
+
+        equipment_info = detection.get("equipment_info")
+        equipment_name = (equipment_info or {}).get("name") \
+            if isinstance(equipment_info, dict) else None
+        object_class = (detection.get("object_class")
+                        or detection.get("class") or "object")
+
+        request = {
+            "key": self._detection_key(detection),
+            "center": {"latitude": latitude, "longitude": longitude},
+            "radius_m": radius_m,
+            "object_class": object_class,
+            "equipment_name": equipment_name,
+            "used_equipment_range": used_equipment_range,
+        }
+
+        if not used_equipment_range:
+            print(f"[checkpoints] {object_class}: no equipment_info "
+                  f"max_range_km, falling back to {radius_m:.0f} m")
+
+        def run():
+            payload = fetch_nearby_checkpoints(
+                api_base, latitude, longitude, radius_m, timeout=timeout)
+            if payload is None:
+                return
+            result = dict(request)
+            result["checkpoints"] = checkpoints_from_response(payload)
+            result["checkpoint_count"] = payload.get(
+                "checkpoint_count", len(result["checkpoints"]))
+            self.checkpoints_ready.emit(result)
+
+        threading.Thread(target=run, daemon=True).start()
+
+    @pyqtSlot(dict)
+    def _on_checkpoints_ready(self, data):
+        """Draw and log the checkpoints found near a detected object."""
+        self.map_widget.add_checkpoints(data)
+
+        checkpoints = data.get("checkpoints") or []
+        count = data.get("checkpoint_count", len(checkpoints))
+        radius_km = data.get("radius_m", 0.0) / 1000.0
+        label = data.get("equipment_name") or data.get("object_class")
+        origin = ("equipment max range" if data.get("used_equipment_range")
+                  else "default radius")
+        center = data.get("center") or {}
+
+        print(f"[checkpoints] {label}: {count} within {radius_km:.2f} km "
+              f"({origin}) of "
+              f"{center.get('latitude')}, {center.get('longitude')}")
+        for checkpoint in checkpoints:
+            if isinstance(checkpoint, dict):
+                print(f"[checkpoints]   - "
+                      f"{checkpoint.get('name') or checkpoint.get('id')}")
+
+        self.statusBar().showMessage(
+            f"{label}: {count} checkpoint(s) within {radius_km:.2f} km"
         )
 
     def _update_map(self):

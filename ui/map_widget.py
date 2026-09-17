@@ -14,6 +14,7 @@ class MapWidget(QWidget):
     def __init__(self, api_base=None, center=None, zoom=None, layers=None):
         super().__init__()
         self.detections = []
+        self.checkpoints = []
         self.api_base = api_base  # e.g. "http://127.0.0.1:5000" for offline tiles
         self.center = center      # [lat, lon] initial view; None -> map.html default
         self.zoom = zoom          # initial zoom level
@@ -94,6 +95,37 @@ class MapWidget(QWidget):
         """Remove all detection markers from map"""
         self.detections = []
         js_code = "window.clearDetections();"
+        self.web_view.page().runJavaScript(js_code)
+
+    def add_checkpoints(self, checkpoint_data):
+        """Draw the checkpoints found near one detected object.
+
+        Args:
+            checkpoint_data: dict with keys: key (the detection this set
+                belongs to), center {latitude, longitude}, radius_m,
+                checkpoint_count, checkpoints (list), and optionally
+                object_class / equipment_name for the popup text.
+
+        A detection can be re-queried (a corrected depth changes the projected
+        position), so a set replaces any earlier set drawn for the same key
+        rather than stacking a second ring of markers on the map.
+        """
+        key = checkpoint_data.get("key")
+        for index, existing in enumerate(self.checkpoints):
+            if key is not None and existing.get("key") == key:
+                self.checkpoints[index] = checkpoint_data
+                break
+        else:
+            self.checkpoints.append(checkpoint_data)
+
+        json_str = json.dumps(checkpoint_data)
+        js_code = f"window.addCheckpoints({json_str});"
+        self.web_view.page().runJavaScript(js_code)
+
+    def clear_checkpoints(self):
+        """Remove all checkpoint markers and range circles from map"""
+        self.checkpoints = []
+        js_code = "window.clearCheckpoints();"
         self.web_view.page().runJavaScript(js_code)
 
     def center_on_drone(self, lat, lon, zoom=15):
