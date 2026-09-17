@@ -19,6 +19,18 @@
         .checkpoint-popup strong { color: #00897B; font-size: 14px; }
         .checkpoint-popup .info-row { margin: 3px 0; }
         .checkpoint-popup .muted { color: #666; font-size: 12px; }
+        /* Range label: a dark pill so it reads over bright or dark imagery. */
+        .range-label {
+            background: rgba(20, 20, 20, 0.78);
+            color: #FFD54F;
+            font: bold 11px/1.4 sans-serif;
+            padding: 2px 7px;
+            border-radius: 10px;
+            border: 1px solid rgba(255, 255, 255, 0.55);
+            white-space: nowrap;
+            text-shadow: 0 1px 2px rgba(0, 0, 0, 0.9);
+        }
+        .range-label-wrap { background: transparent; border: none; }
     </style>
 </head>
 <body>
@@ -366,9 +378,12 @@
 
         function removeCheckpointLayers(entry) {
             if (!entry) { return; }
-            if (entry.circle && map.hasLayer(entry.circle)) {
-                map.removeLayer(entry.circle);
-            }
+            // casing and label are drawn with the circle, so they go with it.
+            ['casing', 'circle', 'label'].forEach(function(key) {
+                if (entry[key] && map.hasLayer(entry[key])) {
+                    map.removeLayer(entry[key]);
+                }
+            });
             (entry.markers || []).forEach(function(m) {
                 if (map.hasLayer(m)) { map.removeLayer(m); }
             });
@@ -468,30 +483,63 @@
             removeCheckpointLayers(checkpointLayers[key]);
 
             // The search area the radius came from (equipment max range).
-            var circle = null;
+            //
+            // Satellite imagery is busy and mid-toned, so a single thin stroke
+            // disappears into it. Drawn as a dark casing with a bright dashed
+            // stroke on top: the casing separates the line from whatever is
+            // under it, and the pair stays legible over foliage, rooftops and
+            // water alike.
+            var circle = null, casing = null, label = null;
             if (!isNaN(radius) && radius > 0) {
+                casing = L.circle([lat, lon], {
+                    radius: radius,
+                    color: '#10201A',
+                    weight: 7,
+                    opacity: 0.45,
+                    fill: false,
+                    interactive: false
+                }).addTo(map);
+
                 circle = L.circle([lat, lon], {
                     radius: radius,
-                    color: '#00897B',
-                    weight: 2,
-                    opacity: 0.8,
-                    fillColor: '#00897B',
-                    fillOpacity: 0.07,
-                    dashArray: '6, 6'
+                    color: '#FFC107',      // amber reads against green and grey
+                    weight: 3,
+                    opacity: 1.0,
+                    // Kept faint on purpose: rings nest (a 5 km inside a
+                    // 12 km) and the fills stack, so anything heavier tints
+                    // the imagery it is supposed to sit over.
+                    fillColor: '#FFD54F',
+                    fillOpacity: 0.05,
+                    dashArray: '12, 8'
                 }).addTo(map);
 
                 var rangeKm = (radius / 1000).toFixed(2);
-                circle.bindTooltip(
-                    escapeHtml(data.equipment_name || data.object_class ||
-                               'equipment') + ' range: ' + rangeKm + ' km',
-                    {sticky: true});
+                var rangeFor = escapeHtml(data.equipment_name ||
+                                          data.object_class || 'equipment');
+                circle.bindTooltip(rangeFor + ' range: ' + rangeKm + ' km',
+                                   {sticky: true});
+
+                // A standing label on the ring's north edge, so the circle is
+                // identifiable without hovering it.
+                var northLat = lat + (radius / 111320.0);
+                label = L.marker([northLat, lon], {
+                    interactive: false,
+                    icon: L.divIcon({
+                        className: 'range-label-wrap',
+                        html: '<div class="range-label">' + rangeFor + ' · ' +
+                              rangeKm + ' km</div>',
+                        iconSize: null
+                    })
+                }).addTo(map);
             }
 
             var checkpointIcon = L.divIcon({
                 className: 'checkpoint-marker',
-                html: '<div style="background: #00897B; width: 14px; height: 14px; border: 2px solid white; box-shadow: 0 0 4px rgba(0,0,0,0.5);"></div>',
-                iconSize: [14, 14],
-                iconAnchor: [7, 7]
+                html: '<div style="background: #00BFA5; width: 16px; height: 16px;'
+                      + ' border: 2px solid #fff;'
+                      + ' box-shadow: 0 0 0 1px rgba(0,0,0,0.75), 0 0 6px rgba(0,0,0,0.6);"></div>',
+                iconSize: [16, 16],
+                iconAnchor: [8, 8]
             });
 
             var markers = [];
@@ -542,7 +590,8 @@
                 markers.push(marker);
             });
 
-            checkpointLayers[key] = {circle: circle, markers: markers};
+            checkpointLayers[key] = {casing: casing, circle: circle,
+                                     label: label, markers: markers};
         };
 
         // Remove every checkpoint circle and marker
