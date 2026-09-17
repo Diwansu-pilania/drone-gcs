@@ -268,6 +268,8 @@ class MainWindow(QMainWindow):
         # results arrive from a worker thread and are drawn here.
         self.checkpoints_ready.connect(self._on_checkpoints_ready)
         self.response_drone_ready.connect(self._on_response_drone_ready)
+        self.detection_panel.response_authorized.connect(
+            self._on_response_authorized)
 
     def _show_connection_dialog(self):
         """Show connection dialog and connect"""
@@ -525,6 +527,8 @@ class MainWindow(QMainWindow):
                     "every drone in range was ruled out")
 
             result["key"] = key
+            result["target_latitude"] = latitude
+            result["target_longitude"] = longitude
             self.response_drone_ready.emit(result)
 
         threading.Thread(target=run, daemon=True).start()
@@ -536,6 +540,7 @@ class MainWindow(QMainWindow):
 
         selected = result.get("selected")
         if selected:
+            self._plot_shooter(result, selected)
             print(f"[drones] selected {selected['drone_name']} "
                   f"(score {selected['score']}, ETA {selected['eta_min']} min)")
             for line in selected.get("why_best") or []:
@@ -551,6 +556,47 @@ class MainWindow(QMainWindow):
                 print(f"[drones]   {entry['drone_name']}: "
                       f"{'; '.join(entry['reasons'])}")
             self.statusBar().showMessage(f"No response drone: {why}")
+
+    def _plot_shooter(self, result, selected):
+        """Draw the selected drone on the map, with its route to the object.
+
+        Skipped when the drone has no coordinates: a marker at a guessed
+        position would be worse than none.
+        """
+        if selected.get("latitude") is None or selected.get("longitude") is None:
+            print("[drones] selected drone has no position, so it is not "
+                  "plotted on the map")
+            return
+
+        self.map_widget.add_shooter({
+            "key": result.get("key"),
+            "latitude": selected["latitude"],
+            "longitude": selected["longitude"],
+            "target_latitude": result.get("target_latitude"),
+            "target_longitude": result.get("target_longitude"),
+            "drone_name": selected.get("drone_name"),
+            "type_of_drone": selected.get("type_of_drone"),
+            "status": selected.get("status"),
+            "score": selected.get("score"),
+            "eta_min": selected.get("eta_min"),
+            "distance_km": selected.get("distance_km"),
+            "battery_percentage": selected.get("battery_percentage"),
+        })
+
+    @pyqtSlot(dict, str, dict)
+    def _on_response_authorized(self, detection, authorized_by, drone):
+        """Note who authorised a response.
+
+        A record, not a command: nothing is sent and no drone is dispatched.
+        """
+        target = (detection.get("object_class") or detection.get("class")
+                  or "object")
+        print(f"[response] {drone.get('drone_name')} authorized by "
+              f"{authorized_by} for {target} "
+              f"({detection.get('image_file') or detection.get('id')})")
+        self.statusBar().showMessage(
+            f"{drone.get('drone_name')} authorized by {authorized_by} "
+            f"— recorded, not dispatched")
 
     @pyqtSlot(dict)
     def _on_checkpoints_ready(self, data):

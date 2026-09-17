@@ -1,10 +1,12 @@
 """Detection panel - scrollable list of detected objects with thumbnails"""
 from PyQt6.QtWidgets import (QWidget, QVBoxLayout, QHBoxLayout, QLabel,
                               QScrollArea, QFrame, QPushButton, QGroupBox)
-from PyQt6.QtCore import Qt, pyqtSlot
+from PyQt6.QtCore import Qt, pyqtSignal, pyqtSlot
 from PyQt6.QtGui import QPixmap, QImage
 import requests
 from datetime import datetime
+
+import config
 
 from html import escape as html_escape
 
@@ -70,10 +72,15 @@ def equipment_rows(info):
 class DetectionItemWidget(QWidget):
     """Single detection item display; rebuilt in place when depth arrives."""
 
+    # (detection, authorized_by, drone) — raised when the button is clicked.
+    response_authorized = pyqtSignal(dict, str, dict)
+
     def __init__(self, detection):
         super().__init__()
         self._thumb = None
         self._loaded_image_url = None
+        self._selected_drone = None
+        self._authorized_by = None
         self._init_ui()
         self.set_data(detection)
         self.setStyleSheet("""
@@ -142,6 +149,20 @@ class DetectionItemWidget(QWidget):
             "padding: 4px 6px;")
         self._drone.setVisible(False)
         outer.addWidget(self._drone)
+
+        # Authorisation: records WHO approved this response, in this window.
+        # It sends nothing and dispatches nothing — see _on_authorize.
+        self._authorize_btn = QPushButton("Authorize response")
+        self._authorize_btn.setStyleSheet("""
+            QPushButton { background: #283593; color: white; border: none;
+                          padding: 6px 10px; border-radius: 3px;
+                          font-weight: bold; }
+            QPushButton:hover { background: #1A237E; }
+            QPushButton:disabled { background: #bdbdbd; }
+        """)
+        self._authorize_btn.clicked.connect(self._on_authorize)
+        self._authorize_btn.setVisible(False)
+        outer.addWidget(self._authorize_btn)
 
         # Checkpoints returned by the /nearby lookup for this object.
         self._checkpoints = QLabel()
@@ -297,6 +318,8 @@ class DetectionItemWidget(QWidget):
         if not result:
             self._drone.clear()
             self._drone.setVisible(False)
+            self._selected_drone = None
+            self._authorize_btn.setVisible(False)
             return
 
         selected = result.get("selected")
@@ -318,6 +341,8 @@ class DetectionItemWidget(QWidget):
                          f"+{len(excluded) - 4} more ruled out</span>")
             self._drone.setText(html)
             self._drone.setVisible(True)
+            self._selected_drone = None
+            self._authorize_btn.setVisible(False)
             return
 
         name = selected.get("drone_name") or f"drone {selected.get('drone_id')}"
@@ -359,6 +384,44 @@ class DetectionItemWidget(QWidget):
 
         self._drone.setText(html)
         self._drone.setVisible(True)
+
+        self._selected_drone = selected
+        if self._authorized_by is None:
+            self._authorize_btn.setEnabled(True)
+            self._authorize_btn.setText("Authorize response")
+            self._authorize_btn.setVisible(True)
+        else:
+            # Already authorised: show that rather than offering it again.
+            self._show_authorized()
+
+    def _on_authorize(self):
+        """Record who authorised this response.
+
+        This is a record, not a command: nothing is sent and no drone is
+        dispatched. It names the person accountable for the decision, in this
+        window, and the signal lets the rest of the app act on it later.
+        """
+        if not self._selected_drone:
+            return
+        who = getattr(config, "OPERATOR_NAME", "") or "unknown-operator"
+        self._authorized_by = who
+        self._show_authorized()
+        self.response_authorized.emit(self.detection, who,
+                                      self._selected_drone)
+
+    def _show_authorized(self):
+        """Replace the button with who authorised it, and when."""
+        stamp = datetime.now().strftime("%H:%M:%S")
+        self._authorize_btn.setEnabled(False)
+        self._authorize_btn.setText(
+            f"Authorized by {self._authorized_by} · {stamp}")
+        self._authorize_btn.setStyleSheet("""
+            QPushButton { background: #E8F5E9; color: #1B5E20;
+                          border: 1px solid #A5D6A7; padding: 6px 10px;
+                          border-radius: 3px; font-weight: bold; }
+            QPushButton:disabled { background: #E8F5E9; color: #1B5E20; }
+        """)
+        self._authorize_btn.setVisible(True)
 
     def set_checkpoints(self, data):
         """Show the /nearby result for this detection.
@@ -476,6 +539,10 @@ class DetectionItemWidget(QWidget):
 class DetectionPanel(QWidget):
     """Panel displaying list of all detected objects"""
 
+    # (detection, authorized_by, drone) — forwarded from whichever item was
+    # authorised.
+    response_authorized = pyqtSignal(dict, str, dict)
+
     def __init__(self):
         super().__init__()
         self.detections = []
@@ -527,6 +594,7 @@ class DetectionPanel(QWidget):
             return
 
         item = DetectionItemWidget(detection_data)
+        item.response_authorized.connect(self.response_authorized)
         self._items[key] = item
         self.detections.append(detection_data)
         self.list_layout.insertWidget(0, item)   # newest first

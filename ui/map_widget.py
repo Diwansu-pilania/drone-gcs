@@ -15,6 +15,7 @@ class MapWidget(QWidget):
         super().__init__()
         self.detections = []
         self.checkpoints = []
+        self.shooters = []
         self.api_base = api_base  # e.g. "http://127.0.0.1:5000" for offline tiles
         self.center = center      # [lat, lon] initial view; None -> map.html default
         self.zoom = zoom          # initial zoom level
@@ -121,6 +122,34 @@ class MapWidget(QWidget):
         json_str = json.dumps(checkpoint_data)
         js_code = f"window.addCheckpoints({json_str});"
         self.web_view.page().runJavaScript(js_code)
+
+    def add_shooter(self, shooter_data):
+        """Plot the drone selected to respond, and its route to the object.
+
+        Args:
+            shooter_data: dict with key (the detection this responds to),
+                latitude, longitude, target_latitude, target_longitude, and
+                the drone's name, type, score, eta_min, distance_km,
+                battery_percentage and status for the popup.
+
+        Keyed by detection, so re-selecting for the same object replaces the
+        plotted drone instead of leaving the previous one on the map.
+        """
+        key = shooter_data.get("key")
+        for index, existing in enumerate(self.shooters):
+            if key is not None and existing.get("key") == key:
+                self.shooters[index] = shooter_data
+                break
+        else:
+            self.shooters.append(shooter_data)
+
+        json_str = json.dumps(shooter_data)
+        self.web_view.page().runJavaScript(f"window.addShooter({json_str});")
+
+    def clear_shooters(self):
+        """Remove every plotted response drone from the map"""
+        self.shooters = []
+        self.web_view.page().runJavaScript("window.clearShooters();")
 
     def clear_checkpoints(self):
         """Remove all checkpoint markers and range circles from map"""

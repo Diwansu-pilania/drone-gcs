@@ -31,6 +31,10 @@
             text-shadow: 0 1px 2px rgba(0, 0, 0, 0.9);
         }
         .range-label-wrap { background: transparent; border: none; }
+        .shooter-popup { max-width: 300px; font-size: 13px; line-height: 1.6; }
+        .shooter-popup strong { color: #283593; font-size: 14px; }
+        .shooter-popup .info-row { margin: 3px 0; }
+        .shooter-popup .muted { color: #666; font-size: 12px; }
     </style>
 </head>
 <body>
@@ -600,6 +604,116 @@
                 removeCheckpointLayers(checkpointLayers[key]);
             });
             checkpointLayers = {};
+        };
+
+        // --- selected shooter drone --------------------------------------
+        // The drone chosen to respond to an object, keyed by that object so a
+        // re-selection replaces it rather than leaving the old one behind.
+        var shooterLayers = {};
+
+        function removeShooterLayers(entry) {
+            if (!entry) { return; }
+            ['marker', 'route'].forEach(function(key) {
+                if (entry[key] && map.hasLayer(entry[key])) {
+                    map.removeLayer(entry[key]);
+                }
+            });
+        }
+
+        // Plot the drone selected to respond, and its route to the object.
+        window.addShooter = function(data) {
+            if (!data) { return; }
+            var lat = Number(data.latitude), lon = Number(data.longitude);
+            if (isNaN(lat) || isNaN(lon)) { return; }
+
+            var key = String(data.key != null ? data.key : 'shooter');
+            removeShooterLayers(shooterLayers[key]);
+
+            // Indigo, and a diamond rather than a circle or square, so it is
+            // not mistaken for the blue drone marker or a teal checkpoint.
+            var shooterIcon = L.divIcon({
+                className: 'shooter-marker',
+                html: '<div style="width: 16px; height: 16px; background: #3949AB;'
+                    + ' border: 2px solid #fff; transform: rotate(45deg);'
+                    + ' box-shadow: 0 0 0 1px rgba(0,0,0,0.75), 0 0 6px rgba(0,0,0,0.6);">'
+                    + '</div>',
+                iconSize: [16, 16],
+                iconAnchor: [8, 8]
+            });
+
+            var marker = L.marker([lat, lon], {icon: shooterIcon}).addTo(map);
+
+            // The path it would fly is NOT drawn up front: with several
+            // detections on screen the lines cross the map and bury it. It is
+            // created when the drone is clicked and removed when the popup
+            // closes, so the route is shown for the one being looked at.
+            var entry = {marker: marker, route: null};
+            var targetLat = Number(data.target_latitude);
+            var targetLon = Number(data.target_longitude);
+            var hasTarget = !isNaN(targetLat) && !isNaN(targetLon);
+
+            if (hasTarget) {
+                marker.on('popupopen', function() {
+                    if (entry.route) { return; }
+                    entry.route = L.polyline(
+                        [[lat, lon], [targetLat, targetLon]],
+                        {color: '#3949AB', weight: 3, opacity: 0.85,
+                         dashArray: '2, 7', lineCap: 'round'}
+                    ).addTo(map);
+                });
+                marker.on('popupclose', function() {
+                    if (entry.route && map.hasLayer(entry.route)) {
+                        map.removeLayer(entry.route);
+                    }
+                    entry.route = null;
+                });
+            }
+
+            var name = data.drone_name || 'Response drone';
+            var html = '<div class="shooter-popup">';
+            html += '<div class="info-row"><strong>🚁 ' + escapeHtml(name) +
+                    '</strong></div>';
+            if (data.type_of_drone) {
+                html += '<div class="info-row">🏷 ' +
+                        escapeHtml(data.type_of_drone) + '</div>';
+            }
+            if (data.score != null) {
+                html += '<div class="info-row">⭐ Score ' +
+                        Number(data.score).toFixed(0) + '/100</div>';
+            }
+            if (data.eta_min != null) {
+                html += '<div class="info-row">⏱ Overhead in ~' +
+                        Number(data.eta_min).toFixed(0) + ' min</div>';
+            }
+            if (data.distance_km != null) {
+                html += '<div class="info-row">📏 ' +
+                        Number(data.distance_km).toFixed(2) + ' km to the object</div>';
+            }
+            if (data.battery_percentage != null) {
+                html += '<div class="info-row">🔋 ' +
+                        Number(data.battery_percentage).toFixed(0) + '%</div>';
+            }
+            if (data.status) {
+                html += '<div class="info-row muted">' +
+                        escapeHtml(data.status) + '</div>';
+            }
+            html += '<div class="info-row muted">📍 ' + lat.toFixed(6) + ', ' +
+                    lon.toFixed(6) + '</div>';
+            html += '</div>';
+            marker.bindPopup(html);
+            marker.bindTooltip(
+                escapeHtml(name) + ' — response drone (click for its path)',
+                {direction: 'top'});
+
+            shooterLayers[key] = entry;
+        };
+
+        // Remove every plotted shooter
+        window.clearShooters = function() {
+            Object.keys(shooterLayers).forEach(function(key) {
+                removeShooterLayers(shooterLayers[key]);
+            });
+            shooterLayers = {};
         };
 
         // Clear all detection markers
