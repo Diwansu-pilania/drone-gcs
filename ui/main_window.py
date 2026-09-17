@@ -18,6 +18,8 @@ from core.checkpoint_client import (checkpoint_name,
                                     equipment_max_range_km,
                                     fetch_nearby_checkpoints,
                                     radius_from_equipment)
+from core.drone_db import fetch_candidate_drones
+from core.drone_selection import select_response_drone
 from core.tile_server import TileCacheGroup
 from ui.map_widget import MapWidget
 from ui.telemetry_panel import TelemetryPanel
@@ -131,6 +133,10 @@ class MainWindow(QMainWindow):
     # Emitted from the checkpoint worker thread so the markers are drawn on the
     # Qt thread. Touching widgets straight from the worker would be unsafe.
     checkpoints_ready = pyqtSignal(dict)
+
+    # The chosen response drone. The database read happens on a worker, so
+    # the result crosses back to the Qt thread here.
+    response_drone_ready = pyqtSignal(dict)
 
     def __init__(self):
         super().__init__()
@@ -261,6 +267,7 @@ class MainWindow(QMainWindow):
         # Map updates from telemetry are handled by the timer; the checkpoint
         # results arrive from a worker thread and are drawn here.
         self.checkpoints_ready.connect(self._on_checkpoints_ready)
+        self.response_drone_ready.connect(self._on_response_drone_ready)
 
     def _show_connection_dialog(self):
         """Show connection dialog and connect"""
@@ -327,6 +334,8 @@ class MainWindow(QMainWindow):
             # the record before anything derived from it is stored.
             self._store_projection(detection)
             self.map_widget.add_detection(detection)
+            # The object has a position, so a drone can be chosen for it.
+            self._select_response_drone(detection)
             # The object now has a position, so ask which checkpoints are
             # within reach of it.
             self._request_checkpoints(detection)
@@ -475,6 +484,73 @@ class MainWindow(QMainWindow):
         else:
             print(f"[checkpoints] saved to the record for "
                   f"{detection.get('image_file') or updated.get('id')}")
+
+    def _select_response_drone(self, detection):
+        """Pick the most suitable drone for this object, off the Qt thread.
+
+        The database read blocks and the connection is remote, so it runs on
+        a worker; a database that is slow or down delays the suggestion and
+        never the UI.
+        """
+        if not getattr(config, "DRONE_SELECTION_ENABLED", False):
+            return
+
+        latitude = detection.get("latitude")
+        longitude = detection.get("longitude")
+        if latitude is None or longitude is None:
+            return
+
+        key = detection_key(detection)
+        radius_m = getattr(config, "DRONE_SEARCH_RADIUS_M", None)
+        limit = getattr(config, "DRONE_SEARCH_LIMIT", 50)
+
+        def run():
+            error = {}
+            drones = fetch_candidate_drones(latitude, longitude,
+                                            radius_m=radius_m, limit=limit,
+                                            error_out=error)
+            result = select_response_drone(drones, latitude, longitude)
+
+            # Say which of the three cases this is, since they look alike from
+            # the panel: the lookup failed, there were no drones, or every
+            # drone was ruled out.
+            if error:
+                result["unavailable_because"] = error.get("message", "")
+            elif not drones:
+                result["unavailable_because"] = (
+                    f"no drone on record within "
+                    f"{(radius_m or 0) / 1000.0:.0f} km of the object")
+            elif not result["selected"]:
+                result["unavailable_because"] = (
+                    "every drone in range was ruled out")
+
+            result["key"] = key
+            self.response_drone_ready.emit(result)
+
+        threading.Thread(target=run, daemon=True).start()
+
+    @pyqtSlot(dict)
+    def _on_response_drone_ready(self, result):
+        """Show the chosen response drone on its detection."""
+        self.detection_panel.set_response_drone(result.get("key"), result)
+
+        selected = result.get("selected")
+        if selected:
+            print(f"[drones] selected {selected['drone_name']} "
+                  f"(score {selected['score']}, ETA {selected['eta_min']} min)")
+            for line in selected.get("why_best") or []:
+                print(f"[drones]   {line}")
+            self.statusBar().showMessage(
+                f"Response drone: {selected['drone_name']} — "
+                f"overhead in ~{selected['eta_min']:.0f} min "
+                f"(score {selected['score']:.0f}/100)")
+        else:
+            why = result.get("unavailable_because", "no drone available")
+            print(f"[drones] no response drone: {why}")
+            for entry in result.get("excluded") or []:
+                print(f"[drones]   {entry['drone_name']}: "
+                      f"{'; '.join(entry['reasons'])}")
+            self.statusBar().showMessage(f"No response drone: {why}")
 
     @pyqtSlot(dict)
     def _on_checkpoints_ready(self, data):
