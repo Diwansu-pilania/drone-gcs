@@ -9,6 +9,17 @@ from datetime import datetime
 from html import escape as html_escape
 
 from core.checkpoint_client import (checkpoint_distance_m, checkpoint_name)
+from core.threat_score import score_detection
+
+
+BAND_COLOURS = {
+    "CRITICAL": "#C62828",
+    "HIGH": "#EF6C00",
+    "MODERATE": "#F9A825",
+    "LOW": "#2E7D32",
+    "UNSCORED": "#9E9E9E",
+}
+BAND_COLOUR_DEFAULT = "#555555"
 
 
 def detection_key(d):
@@ -104,6 +115,14 @@ class DetectionItemWidget(QWidget):
         row.addLayout(info, 1)
         outer.addLayout(row)
 
+        # Threat score: the headline for this detection, so it goes first.
+        self._threat = QLabel()
+        self._threat.setWordWrap(True)
+        self._threat.setTextFormat(Qt.TextFormat.RichText)
+        self._threat.setStyleSheet("padding: 2px 1px;")
+        self._threat.setVisible(False)
+        outer.addWidget(self._threat)
+
         # Equipment metadata sent by the detector.
         self._equip = QLabel()
         self._equip.setWordWrap(True)
@@ -167,6 +186,7 @@ class DetectionItemWidget(QWidget):
         self._time.setText(f"🕐 {self._format_time(det.get('timestamp'))}")
 
         self._set_equipment(det.get("equipment_info"))
+        self._set_threat(det)
 
         # Load thumbnail once, when an image_url first appears.
         image_url = det.get("image_url")
@@ -197,6 +217,65 @@ class DetectionItemWidget(QWidget):
 
         self._equip.setText(html)
         self._equip.setVisible(True)
+
+    def _set_threat(self, det):
+        """Show this detection's threat score out of 100, and what made it."""
+        try:
+            result = score_detection(det)
+        except Exception as exc:        # a scoring slip must not blank the item
+            print(f"[threat] could not score detection: {exc}")
+            self._threat.clear()
+            self._threat.setVisible(False)
+            return
+
+        colour = BAND_COLOURS.get(result["band"], BAND_COLOUR_DEFAULT)
+        score = result["score"]
+        filled = max(0.0, min(100.0, score))
+
+        html = (f"<div style='color:{colour};'>"
+                f"<span style='font-size:15px;font-weight:bold;'>⚠ {score:.0f}"
+                f"</span><span style='font-size:11px;'> / 100</span>"
+                f"<span style='font-size:11px;font-weight:bold;'> · "
+                f"{html_escape(result['band'])}</span></div>")
+
+        # A bar drawn from table cells: QLabel rich text has no progress bar.
+        # Both widths are stated and a zero-width cell is left out entirely —
+        # a 0% cell still claims its content width and fills the bar.
+        cells = ""
+        if filled > 0:
+            cells += (f"<td width='{filled:.0f}%' style='background:{colour};'>"
+                      f"&nbsp;</td>")
+        if filled < 100:
+            cells += (f"<td width='{100 - filled:.0f}%' "
+                      f"style='background:#e0e0e0;'>&nbsp;</td>")
+        html += (f"<table cellspacing='0' cellpadding='0' width='100%' "
+                 f"style='margin:2px 0;'><tr>{cells}</tr></table>")
+
+        # What produced the number: the points each factor contributed.
+        rows = ""
+        for factor in result["factors"]:
+            if factor["available"]:
+                value = f"{factor['points']:.1f}"
+                style = "color:#222;"
+            else:
+                value = "n/a"
+                style = "color:#bbb;"
+            rows += (f"<tr><td style='color:#777;'>"
+                     f"{html_escape(factor['label'])}"
+                     f"<span style='color:#aaa;'> ·w{factor['weight']:.0f}</span>"
+                     f"</td><td align='right' style='{style}'>{value}</td></tr>")
+        html += (f"<table cellspacing='0' cellpadding='0' width='100%' "
+                 f"style='font-size:10px;'>{rows}</table>")
+
+        missing = result["factors_total"] - result["factors_present"]
+        if missing:
+            # Otherwise a low score from thin data reads as a low threat.
+            html += (f"<div style='font-size:10px;color:#C62828;'>"
+                     f"{missing} of {result['factors_total']} factors "
+                     f"unavailable — score is a floor</div>")
+
+        self._threat.setText(html)
+        self._threat.setVisible(True)
 
     def set_checkpoints(self, data):
         """Show the /nearby result for this detection.
@@ -274,6 +353,17 @@ class DetectionItemWidget(QWidget):
 
         self._checkpoints.setText(html)
         self._checkpoints.setVisible(True)
+
+        # Checkpoints carry weight in the score, so fold the result into the
+        # detection and re-score now that the count is known.
+        if isinstance(getattr(self, "detection", None), dict):
+            self.detection["nearby_checkpoints"] = {
+                "status": "failed" if data.get("failed") else "ok",
+                "radius_m": data.get("radius_m"),
+                "checkpoint_count": count,
+                "checkpoints": checkpoints,
+            }
+            self._set_threat(self.detection)
 
     def _load_thumbnail(self, image_url):
         try:

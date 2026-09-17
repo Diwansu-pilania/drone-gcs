@@ -131,3 +131,52 @@ CHECKPOINT_API_TIMEOUT = 30.0
 # max_range_km. Normally the detector sends it and that value wins; this only
 # keeps the lookup working if the field is missing or unparseable.
 CHECKPOINT_DEFAULT_RADIUS_M = 10000.0
+
+# --- Threat scoring --------------------------------------------------------
+# A detection's threat, out of 100. Each factor is normalised to 0..1 and
+# multiplied by its weight; the weights below total 100, so the result reads
+# directly as a percentage.
+#
+# Tune the weights here. They do not have to total 100 — the score is scaled
+# by whatever they add up to, so raising one does not silently shrink the
+# others.
+THREAT_WEIGHTS = {
+    "checkpoints": 25.0,   # how much is within reach of this object
+    "range": 20.0,         # equipment_info.max_range_km
+    "score": 25.0,         # equipment_info.score, the equipment DB's rating
+    "domain": 15.0,        # equipment_info.domain, via THREAT_DOMAIN_WEIGHTS
+    "pp": 15.0,            # equipment_info.pp_kg
+}
+
+# Value at which a factor counts as fully weighted. Anything at or above the
+# ceiling scores 1.0 for that factor.
+THREAT_CEILINGS = {
+    "checkpoints": 5.0,    # checkpoints in range
+    "range": 40.0,         # km
+    "score": 10.0,         # the DB's own 0-10 rating
+    "pp": 100.0,           # kg
+}
+
+# How threatening each domain is, 0..1. Names are matched case-insensitively;
+# anything not listed uses THREAT_DOMAIN_DEFAULT.
+THREAT_DOMAIN_WEIGHTS = {
+    "artillery": 1.00,
+    "air defence": 0.90,
+    "air defense": 0.90,
+    "armor": 0.85,
+    "armour": 0.85,
+    "aviation": 0.85,
+    "infantry": 0.45,
+    "recon": 0.40,
+    "logistics": 0.25,
+    "support": 0.25,
+}
+THREAT_DOMAIN_DEFAULT = 0.50
+
+# Score at or above which a detection falls in each band, highest first.
+THREAT_BANDS = (
+    (75.0, "CRITICAL"),
+    (50.0, "HIGH"),
+    (25.0, "MODERATE"),
+    (0.0, "LOW"),
+)
