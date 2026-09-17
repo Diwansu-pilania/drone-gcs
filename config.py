@@ -116,11 +116,16 @@ TILE_CACHE_DIR = "map_tiles"
 CHECKPOINT_API_BASE = "http://100.111.81.89:8000"
 
 # Seconds to wait for the checkpoint service before giving up. The request runs
-# off the Qt thread, so a slow peer delays checkpoints but never the UI.
+# off the Qt thread, so a generous value delays checkpoints but never the UI.
 #
-# 5s was not enough: the service answers a PostGIS query and opens a fresh
-# database connection per request, which read-timed-out on a reachable peer.
-CHECKPOINT_API_TIMEOUT = 15.0
+# The service was measured at ~7.6s for a single request, nearly all of it
+# opening a fresh database connection rather than running the query. The
+# margin over that is deliberate: its handler blocks while querying, so
+# detections arriving together queue behind each other and the second and
+# third requests wait roughly 2x and 3x a single one. 30s covers a short
+# burst; the fix for the underlying slowness is on the service (pool the
+# connection, and do not block its event loop).
+CHECKPOINT_API_TIMEOUT = 30.0
 
 # Search radius used when a detection carries no usable equipment_info
 # max_range_km. Normally the detector sends it and that value wins; this only
