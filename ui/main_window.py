@@ -20,7 +20,7 @@ from core.checkpoint_client import (checkpoint_name,
 from core.tile_server import TileCacheGroup
 from ui.map_widget import MapWidget
 from ui.telemetry_panel import TelemetryPanel
-from ui.detection_panel import DetectionPanel
+from ui.detection_panel import DetectionPanel, detection_key
 import config
 
 
@@ -336,16 +336,6 @@ class MainWindow(QMainWindow):
             f"Detection: {obj_class} ({confidence*100:.0f}%){suffix}"
         )
 
-    @staticmethod
-    def _detection_key(detection):
-        """Identity used to tie a checkpoint set to its detection.
-
-        Matches the key the map widget uses for detection markers, so the two
-        stay in step when a detection is updated and re-queried.
-        """
-        return (detection.get("image_file") or detection.get("id")
-                or detection.get("timestamp"))
-
     def _request_checkpoints(self, detection):
         """Ask the external service which checkpoints are near this object.
 
@@ -379,7 +369,10 @@ class MainWindow(QMainWindow):
                         or detection.get("class") or "object")
 
         request = {
-            "key": self._detection_key(detection),
+            # The panel's own key, not a second definition of it: a detection
+            # without an image_file used to key as `id` here and `timestamp`
+            # there, so the panel matched no item and the result vanished.
+            "key": detection_key(detection),
             "center": {"latitude": latitude, "longitude": longitude},
             "radius_m": radius_m,
             "object_class": object_class,
