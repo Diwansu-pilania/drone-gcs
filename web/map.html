@@ -1,0 +1,367 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Drone Map</title>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <link rel="stylesheet" href="leaflet.css" />
+    <script src="leaflet.js"></script>
+    <style>
+        body { margin: 0; padding: 0; }
+        #map { position: absolute; top: 0; bottom: 0; width: 100%; }
+        .detection-popup { max-width: 350px; }
+        .detection-popup .image-container { position: relative; display: inline-block; }
+        .detection-popup canvas { max-width: 100%; height: auto; border: 2px solid #ccc; }
+        .detection-popup .info { margin-top: 10px; font-size: 13px; line-height: 1.6; }
+        .detection-popup .info strong { color: #F44336; font-size: 14px; }
+        .detection-popup .info-row { margin: 3px 0; }
+    </style>
+</head>
+<body>
+    <div id="map"></div>
+    <script>
+        // Read initial view + tile source from query params passed by Qt.
+        function getQueryParam(name) {
+            var m = new RegExp('[?&]' + name + '=([^&]*)').exec(window.location.search);
+            return m ? decodeURIComponent(m[1]) : null;
+        }
+
+        // Initial center/zoom (defaults to AIT Pune if not supplied).
+        var centerParam = getQueryParam('center');
+        var initialCenter = centerParam
+            ? centerParam.split(',').map(Number)
+            : [18.6182667, 73.8767611];
+        var initialZoom = getQueryParam('zoom')
+            ? parseInt(getQueryParam('zoom'), 10) : 17;
+
+        // Initialize map
+        var map = L.map('map').setView(initialCenter, initialZoom);
+
+        // Tile source: the GCS tile-cache endpoint (offline-capable).
+        // Qt passes the API base as ?api=http://host:port when loading this file.
+        var apiBase = getQueryParam('api');
+
+        // Build the tile URL for a named layer. Through the proxy we always use
+        // standard XYZ ({z}/{x}/{y}); the server maps it to each provider's own
+        // ordering. Opened standalone (no api), fall back to the provider URL.
+        function layerUrl(name, spec) {
+            if (apiBase) {
+                return apiBase + '/tiles/' + name + '/{z}/{x}/{y}.png';
+            }
+            return spec.url || 'https://tile.openstreetmap.org/{z}/{x}/{y}.png';
+        }
+
+        function prettyName(name) {
+            return name.charAt(0).toUpperCase() + name.slice(1);
+        }
+
+        // Layer definitions come from config (?layers=<json>). Fall back to a
+        // single OSM/street layer if not supplied (e.g. opened standalone).
+        var layersParam = getQueryParam('layers');
+        var baseLayers = {};
+        var overlayLayers = {};
+        var startupLayers = [];
+
+        if (layersParam) {
+            var specs = JSON.parse(layersParam);
+            var overlayZ = 10;  // overlays sit above any base (base stays at 1)
+            Object.keys(specs).forEach(function(name) {
+                var s = specs[name];
+                var layer = L.tileLayer(layerUrl(name, s), {
+                    attribution: s.attribution || '',
+                    maxZoom: s.max_zoom || 19,
+                    maxNativeZoom: s.max_native_zoom || s.max_zoom || 19,
+                    // Fixed z-order so switching the base layer via the control
+                    // never paints it over the label overlays.
+                    zIndex: s.overlay ? overlayZ++ : 1
+                });
+                if (s.overlay) {
+                    overlayLayers[prettyName(name)] = layer;
+                } else {
+                    baseLayers[prettyName(name)] = layer;
+                }
+                if (s['default']) { startupLayers.push(layer); }
+            });
+        }
+
+        if (startupLayers.length === 0) {
+            // Fallback: single layer (old behavior / standalone open).
+            var fallbackUrl = apiBase
+                ? apiBase + '/tiles/{z}/{x}/{y}.png'
+                : 'https://tile.openstreetmap.org/{z}/{x}/{y}.png';
+            var fallback = L.tileLayer(fallbackUrl, {
+                attribution: '© OpenStreetMap contributors',
+                maxZoom: 19
+            });
+            baseLayers['Street'] = fallback;
+            startupLayers.push(fallback);
+        }
+
+        // Add startup layers (bases first, then overlays paint on top).
+        startupLayers.forEach(function(l) { l.addTo(map); });
+
+        // Layer switcher (top-right), like Google's Map/Satellite toggle.
+        if (Object.keys(baseLayers).length > 1 ||
+            Object.keys(overlayLayers).length > 0) {
+            L.control.layers(baseLayers, overlayLayers,
+                {position: 'topright', collapsed: true}).addTo(map);
+        }
+
+        // Drone marker with custom icon (blue circle with arrow)
+        var droneIcon = L.divIcon({
+            className: 'drone-marker',
+            html: '<div style="background: #2196F3; width: 20px; height: 20px; border-radius: 50%; border: 3px solid white; box-shadow: 0 0 5px rgba(0,0,0,0.5);"></div>',
+            iconSize: [20, 20],
+            iconAnchor: [10, 10]
+        });
+
+        var droneMarker = L.marker(initialCenter, {icon: droneIcon}).addTo(map);
+        var droneHeadingLine = null;
+
+        // Flight path polyline
+        var flightPath = L.polyline([], {color: '#2196F3', weight: 3, opacity: 0.7}).addTo(map);
+        var pathCoords = [];
+
+        // Detection layers keyed by the server's stable detection identity.
+        // Repeated updates (initial/depth retries) replace one clickable point
+        // instead of stacking duplicate markers.
+        var detectionMarkers = {};
+
+        function detectionKey(data) {
+            return String(data.image_file || data.id || data.timestamp ||
+                ((data.track_id != null ? data.track_id : 'unknown') + ':' +
+                 (data.object_class || data.class || 'object')));
+        }
+
+        function removeDetectionLayers(entry) {
+            if (!entry) { return; }
+            if (entry.marker && map.hasLayer(entry.marker)) {
+                map.removeLayer(entry.marker);
+            }
+            if (entry.line && map.hasLayer(entry.line)) {
+                map.removeLayer(entry.line);
+            }
+        }
+
+        // Update drone position from Qt
+        window.updateDronePosition = function(lat, lon, alt, heading) {
+            droneMarker.setLatLng([lat, lon]);
+
+            // Update flight path. Keep every point for the whole session, from
+            // the moment the link is established until it ends.
+            pathCoords.push([lat, lon]);
+            flightPath.setLatLngs(pathCoords);
+
+            // Draw heading indicator (line from drone)
+            if (droneHeadingLine) {
+                map.removeLayer(droneHeadingLine);
+            }
+
+            // Calculate endpoint for heading line (50 meters ahead)
+            var headingRad = heading * Math.PI / 180;
+            var distance = 0.0005; // ~50 meters in degrees
+            var endLat = lat + distance * Math.cos(headingRad);
+            var endLon = lon + distance * Math.sin(headingRad);
+
+            droneHeadingLine = L.polyline(
+                [[lat, lon], [endLat, endLon]],
+                {color: '#FF5722', weight: 3, opacity: 0.8}
+            ).addTo(map);
+
+            // Keep drone in view (only if near edge)
+            var bounds = map.getBounds();
+            var ne = bounds.getNorthEast();
+            var sw = bounds.getSouthWest();
+            var margin = (ne.lat - sw.lat) * 0.2;
+
+            if (lat > ne.lat - margin || lat < sw.lat + margin ||
+                lon > ne.lng - margin || lon < sw.lng + margin) {
+                map.panTo([lat, lon], {animate: true, duration: 0.5});
+            }
+        };
+
+        // Helper function to draw bounding box on image
+        function drawBoundingBox(imageUrl, bbox, callback) {
+            var img = new Image();
+            img.crossOrigin = 'anonymous';
+            img.onload = function() {
+                var canvas = document.createElement('canvas');
+                canvas.width = img.width;
+                canvas.height = img.height;
+                var ctx = canvas.getContext('2d');
+
+                // Draw the image
+                ctx.drawImage(img, 0, 0);
+
+                // Draw bounding box if provided
+                if (bbox && bbox.x1 != null && bbox.y1 != null && bbox.x2 != null && bbox.y2 != null) {
+                    ctx.strokeStyle = '#00FF00';  // Green box
+                    ctx.lineWidth = 3;
+                    ctx.strokeRect(bbox.x1, bbox.y1, bbox.x2 - bbox.x1, bbox.y2 - bbox.y1);
+
+                    // Add semi-transparent background for better visibility
+                    ctx.strokeStyle = '#000000';
+                    ctx.lineWidth = 5;
+                    ctx.globalAlpha = 0.3;
+                    ctx.strokeRect(bbox.x1, bbox.y1, bbox.x2 - bbox.x1, bbox.y2 - bbox.y1);
+                    ctx.globalAlpha = 1.0;
+
+                    // Draw green box again on top
+                    ctx.strokeStyle = '#00FF00';
+                    ctx.lineWidth = 3;
+                    ctx.strokeRect(bbox.x1, bbox.y1, bbox.x2 - bbox.x1, bbox.y2 - bbox.y1);
+                }
+
+                callback(canvas);
+            };
+            img.onerror = function() {
+                callback(null);
+            };
+            img.src = imageUrl;
+        }
+
+        // Add detection marker from Qt
+        window.addDetection = function(detectionData) {
+            var lat = detectionData.latitude;
+            var lon = detectionData.longitude;
+            var objectClass = detectionData.object_class || detectionData.class;
+            var confidence = detectionData.confidence;
+            var timestamp = detectionData.timestamp;
+            var imageUrl = detectionData.image_url;
+            var altitude = detectionData.altitude;
+            var distance = (detectionData.depth && detectionData.depth.distance_m != null)
+                ? detectionData.depth.distance_m : detectionData.distance_m;
+            var bbox = detectionData.bbox;
+            var syncTimeDiff = detectionData.sync_time_diff;
+            var groundDistance = detectionData.ground_distance;
+            var droneLat = detectionData.drone_lat;
+            var droneLon = detectionData.drone_lon;
+            var droneAlt = detectionData.drone_alt;
+
+            // Detections without a GPS fix can't be placed on the map; skip them
+            // (they still appear in the detection panel).
+            var hasGps = detectionData.has_gps;
+            if (hasGps === undefined) { hasGps = !!(lat || lon); }
+            if (!hasGps) { return; }
+
+            var key = detectionKey(detectionData);
+            removeDetectionLayers(detectionMarkers[key]);
+
+            // Detection marker icon (red pin)
+            var detectionIcon = L.divIcon({
+                className: 'detection-marker',
+                html: '<div style="background: #F44336; width: 16px; height: 16px; border-radius: 50%; border: 2px solid white; box-shadow: 0 0 4px rgba(0,0,0,0.5);"></div>',
+                iconSize: [16, 16],
+                iconAnchor: [8, 8]
+            });
+
+            var marker = L.marker([lat, lon], {icon: detectionIcon}).addTo(map);
+
+            // Draw line from drone to object if we have drone position
+            var projectionLine = null;
+            if (droneLat != null && droneLon != null && (droneLat !== lat || droneLon !== lon)) {
+                projectionLine = L.polyline(
+                    [[droneLat, droneLon], [lat, lon]],
+                    {color: '#FFC107', weight: 2, opacity: 0.6, dashArray: '5, 5'}
+                ).addTo(map);
+            }
+
+            // Build popup content with image and bounding box
+            var popupContent = '<div class="detection-popup">';
+
+            if (imageUrl && bbox) {
+                // Create a unique ID for this popup's canvas
+                var canvasId = 'detection-canvas-' + Date.now() + '-' + Math.random().toString(36).substr(2, 9);
+                popupContent += '<div class="image-container"><canvas id="' + canvasId + '"></canvas></div>';
+            } else if (imageUrl) {
+                popupContent += '<img src="' + imageUrl + '" style="max-width: 300px; max-height: 200px;" />';
+            }
+
+            popupContent += '<div class="info">';
+            popupContent += '<div class="info-row"><strong>' + objectClass + '</strong> (' + (confidence * 100).toFixed(1) + '%)</div>';
+
+            var timeStr = timestamp ? new Date(timestamp).toLocaleString() : 'Unknown';
+            popupContent += '<div class="info-row">📅 Time: ' + timeStr + '</div>';
+
+            popupContent += '<div class="info-row">📍 Object: ' + lat.toFixed(6) + ', ' + lon.toFixed(6) + '</div>';
+
+            if (droneLat != null && droneLon != null) {
+                popupContent += '<div class="info-row">🚁 Drone: ' + droneLat.toFixed(6) + ', ' + droneLon.toFixed(6) + '</div>';
+            }
+
+            if (droneAlt) {
+                popupContent += '<div class="info-row">✈️ Drone Alt: ' + droneAlt.toFixed(1) + ' m</div>';
+            }
+
+            if (distance != null) {
+                popupContent += '<div class="info-row">📏 Direct Distance: ' + distance.toFixed(2) + ' m</div>';
+            }
+
+            if (groundDistance != null && groundDistance !== distance) {
+                popupContent += '<div class="info-row">🗺️ Ground Distance: ' + groundDistance.toFixed(2) + ' m</div>';
+            }
+
+            if (syncTimeDiff != null) {
+                popupContent += '<div class="info-row" style="font-size: 11px; color: #666;">⏱️ Synced (±' + syncTimeDiff.toFixed(1) + 's)</div>';
+            }
+
+            popupContent += '</div></div>';
+
+            // Bind popup
+            var popup = L.popup({maxWidth: 400}).setContent(popupContent);
+            marker.bindPopup(popup);
+
+            // Draw bounding box when popup opens
+            if (imageUrl && bbox) {
+                marker.on('popupopen', function() {
+                    drawBoundingBox(imageUrl, bbox, function(canvas) {
+                        if (canvas) {
+                            var existingCanvas = document.getElementById(canvasId);
+                            if (existingCanvas) {
+                                existingCanvas.width = canvas.width;
+                                existingCanvas.height = canvas.height;
+                                var ctx = existingCanvas.getContext('2d');
+                                ctx.drawImage(canvas, 0, 0);
+                            }
+                        }
+                    });
+                });
+            }
+
+            // Remove projection line when popup closes
+            if (projectionLine) {
+                marker.on('popupclose', function() {
+                    map.removeLayer(projectionLine);
+                });
+            }
+
+            detectionMarkers[key] = {marker: marker, line: projectionLine};
+        };
+
+        // Clear all detection markers
+        window.clearDetections = function() {
+            Object.keys(detectionMarkers).forEach(function(key) {
+                removeDetectionLayers(detectionMarkers[key]);
+            });
+            detectionMarkers = {};
+        };
+
+        // Center map on coordinates
+        window.centerMap = function(lat, lon, zoom) {
+            map.setView([lat, lon], zoom || map.getZoom());
+        };
+
+        // Snap to the offline "home" view (AIT campus) when the drone/system
+        // goes offline. Called from Qt with the configured center/zoom.
+        window.showOfflineView = function(lat, lon, zoom) {
+            map.setView([lat, lon], zoom || initialZoom);
+        };
+
+        // Clear flight path
+        window.clearFlightPath = function() {
+            pathCoords = [];
+            flightPath.setLatLngs([]);
+        };
+    </script>
+</body>
+</html>
