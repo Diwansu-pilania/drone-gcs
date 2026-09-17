@@ -397,13 +397,17 @@ class MainWindow(QMainWindow):
                   f"max_range_km, falling back to {radius_m:.0f} m")
 
         def run():
+            error = {}
             payload = fetch_nearby_checkpoints(
-                api_base, latitude, longitude, radius_m, timeout=timeout)
+                api_base, latitude, longitude, radius_m, timeout=timeout,
+                error_out=error)
             result = dict(request)
             if payload is None:
                 # Still emit, so the panel can say the lookup failed rather
                 # than leaving the operator staring at nothing.
                 result["failed"] = True
+                result["error_kind"] = error.get("kind", "error")
+                result["error_message"] = error.get("message", "")
                 result["checkpoints"] = []
                 result["checkpoint_count"] = 0
             else:
@@ -454,6 +458,9 @@ class MainWindow(QMainWindow):
             "checkpoint_count": result.get("checkpoint_count", 0),
             "checkpoints": result.get("checkpoints") or [],
         }
+        if result.get("failed"):
+            stored["error_kind"] = result.get("error_kind")
+            stored["error_message"] = result.get("error_message")
 
         try:
             updated = server.attach_checkpoints(detection, stored)
@@ -481,7 +488,12 @@ class MainWindow(QMainWindow):
 
         if data.get("failed"):
             label = data.get("equipment_name") or data.get("object_class")
-            self.statusBar().showMessage(f"{label}: checkpoint lookup failed")
+            reason = {"timeout": "service did not answer in time",
+                      "unreachable": "service unreachable",
+                      "http": "service returned an error",
+                      "bad_json": "service reply was not JSON"}.get(
+                          data.get("error_kind"), "lookup failed")
+            self.statusBar().showMessage(f"{label}: checkpoints - {reason}")
             return
 
         self.map_widget.add_checkpoints(data)

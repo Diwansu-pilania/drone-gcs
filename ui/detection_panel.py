@@ -214,9 +214,25 @@ class DetectionItemWidget(QWidget):
         label = data.get("equipment_name") or data.get("object_class") or "object"
 
         if data.get("failed"):
-            html = ("<b style='color:#C62828;'>🛡 Checkpoint lookup failed</b>"
-                    "<br/><span style='color:#777;'>see console for the URL "
-                    "and error</span>")
+            # A slow service and a missing one need different fixes, so say
+            # which happened rather than only "failed".
+            headline, hint = {
+                "timeout": ("Checkpoints: no answer in time",
+                            "the service is reachable but slow - raise "
+                            "CHECKPOINT_API_TIMEOUT"),
+                "unreachable": ("Checkpoints: service unreachable",
+                                "check the address, port, and that it is "
+                                "running"),
+                "http": ("Checkpoints: service returned an error",
+                         "see the console for the status code"),
+                "bad_json": ("Checkpoints: reply was not JSON",
+                             "see the console for what came back"),
+            }.get(data.get("error_kind"),
+                  ("Checkpoint lookup failed", "see the console for details"))
+
+            html = (f"<b style='color:#C62828;'>🛡 {html_escape(headline)}</b>"
+                    f"<br/><span style='color:#777;'>{html_escape(hint)}"
+                    f"</span>")
             self._checkpoints.setText(html)
             self._checkpoints.setVisible(True)
             return
@@ -235,9 +251,22 @@ class DetectionItemWidget(QWidget):
                 name = html_escape(checkpoint_name(checkpoint))
                 away = checkpoint_distance_m(checkpoint)
                 away_text = f"{away:,.0f} m" if away is not None else ""
-                html += (f"<tr><td style='color:#222;'>• {name}</td>"
-                         f"<td style='color:#777;' align='right'>{away_text}"
-                         f"</td></tr>")
+
+                # checkpoint_type / status as the service reports them.
+                detail = ""
+                if isinstance(checkpoint, dict):
+                    kind = (checkpoint.get("checkpoint_type")
+                            or checkpoint.get("type")
+                            or checkpoint.get("category"))
+                    state = checkpoint.get("status")
+                    bits = [str(b) for b in (kind, state) if b]
+                    if bits:
+                        detail = (f"<br/><span style='color:#999;'>&nbsp;&nbsp;"
+                                  f"{html_escape(' · '.join(bits))}</span>")
+
+                html += (f"<tr><td style='color:#222;'>• {name}{detail}</td>"
+                         f"<td style='color:#777;' align='right' "
+                         f"valign='top'>{away_text}</td></tr>")
             html += "</table>"
             if len(checkpoints) > 12:
                 html += (f"<span style='color:#777;'>+ "

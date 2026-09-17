@@ -60,7 +60,7 @@ def radius_from_equipment(detection, default_radius_m):
 
 
 def fetch_nearby_checkpoints(api_base, latitude, longitude, radius_m,
-                             timeout=5.0):
+                             timeout=5.0, error_out=None):
     """Query the checkpoint service and return its parsed response.
 
     Args:
@@ -70,6 +70,9 @@ def fetch_nearby_checkpoints(api_base, latitude, longitude, radius_m,
             position, not the drone's.
         radius_m: Search radius in metres; the service rejects values <= 0.
         timeout: Seconds to wait for the response.
+        error_out: Optional dict filled in on failure with ``kind`` and
+            ``message``. A peer that answers too slowly is a different
+            problem from one that is not there, and the UI says which.
 
     Returns:
         The service's response dict, or ``None`` when the lookup is disabled,
@@ -100,17 +103,43 @@ def fetch_nearby_checkpoints(api_base, latitude, longitude, radius_m,
     # this a wrong address looks identical to the lookup never firing.
     print(f"[checkpoints] GET {url}?{urlencode(params)}")
 
+    def record(kind, message):
+        if error_out is not None:
+            error_out["kind"] = kind
+            error_out["message"] = message
+        print(f"[checkpoints] {message}")
+
     try:
         response = requests.get(url, params=params, timeout=timeout)
         response.raise_for_status()
         payload = response.json()
-    except (requests.RequestException, ValueError) as exc:
-        print(f"[checkpoints] {url} failed: {exc}")
+    except requests.Timeout:
+        # The peer accepted the connection and did not answer in time, which
+        # is a slow service rather than a wrong address.
+        record("timeout",
+               f"{url} timed out after {timeout:g}s - the service is "
+               f"reachable but did not answer. Raise "
+               f"CHECKPOINT_API_TIMEOUT, or speed the query up.")
+        return None
+    except requests.ConnectionError as exc:
+        record("unreachable",
+               f"{url} could not be reached: {exc}. Check the address, the "
+               f"port, and that the service is running.")
+        return None
+    except requests.HTTPError as exc:
+        status = getattr(exc.response, "status_code", "?")
+        record("http", f"{url} answered HTTP {status}: {exc}")
+        return None
+    except ValueError as exc:
+        record("bad_json", f"{url} did not return JSON: {exc}")
+        return None
+    except requests.RequestException as exc:
+        record("error", f"{url} failed: {exc}")
         return None
 
     if not isinstance(payload, dict):
-        print(f"[checkpoints] {url} returned {type(payload).__name__}, "
-              f"expected an object")
+        record("bad_json", f"{url} returned {type(payload).__name__}, "
+                           f"expected an object")
         return None
 
     # The raw reply, trimmed. The service's field names are not fixed by

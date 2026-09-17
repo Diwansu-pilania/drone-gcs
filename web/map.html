@@ -527,9 +527,12 @@
                     html += '<div class="info-row">📏 ' +
                             away.toFixed(0) + ' m from object</div>';
                 }
-                if (cp.type || cp.category) {
-                    html += '<div class="info-row">🏷 ' +
-                            escapeHtml(cp.type || cp.category) + '</div>';
+                var kind = cp.checkpoint_type || cp.type || cp.category;
+                if (kind) {
+                    html += '<div class="info-row">🏷 ' + escapeHtml(kind) + '</div>';
+                }
+                if (cp.status) {
+                    html += '<div class="info-row">🔵 ' + escapeHtml(cp.status) + '</div>';
                 }
                 html += '<div class="info-row muted">📍 ' +
                         pos[0].toFixed(6) + ', ' + pos[1].toFixed(6) + '</div>';
