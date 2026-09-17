@@ -101,3 +101,25 @@ DETECTION_IMAGE_DIR = "detection_images"
 # and any gaps show a blank grid (path/markers still render).
 TILE_CACHE_DIR = "map_tiles"
 
+
+# --- Nearby checkpoint service ---------------------------------------------
+# The GCS asks an external service which checkpoints lie near a detected
+# object: GET <base>/nearby?latitude=..&longitude=..&radius_m=..
+#
+# The service runs on a Tailscale/LAN peer. Leave this empty to switch the
+# lookup off — detections are still mapped, just without checkpoints.
+#
+# NOTE: the port below is uvicorn's default (8000) and is a guess — only the
+# peer's address was known. If the checkpoint service listens elsewhere,
+# change it here. A wrong port shows up as a logged connection error per
+# detection, not a crash.
+CHECKPOINT_API_BASE = "http://100.111.81.89:8000"
+
+# Seconds to wait for the checkpoint service before giving up. The request runs
+# off the Qt thread, so a slow peer delays checkpoints but never the UI.
+CHECKPOINT_API_TIMEOUT = 5.0
+
+# Search radius used when a detection carries no usable equipment_info
+# max_range_km. Normally the detector sends it and that value wins; this only
+# keeps the lookup working if the field is missing or unparseable.
+CHECKPOINT_DEFAULT_RADIUS_M = 5000.0
