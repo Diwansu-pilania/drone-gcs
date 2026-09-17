@@ -6,6 +6,7 @@ from PyQt6.QtCore import Qt, pyqtSignal, pyqtSlot, QTimer
 from PyQt6.QtGui import QAction
 import serial.tools.list_ports
 import threading
+from datetime import datetime
 
 from core.vehicle_state import VehicleState
 from core.mavlink_thread import MAVLinkThread
@@ -22,6 +23,14 @@ from ui.map_widget import MapWidget
 from ui.telemetry_panel import TelemetryPanel
 from ui.detection_panel import DetectionPanel, detection_key
 import config
+
+
+# Fields prepare_detection_for_map works out and writes onto its copy of a
+# detection. They are persisted so the stored record shows the object where
+# the map shows it, instead of the sender's empty position.
+PROJECTION_FIELDS = ("latitude", "longitude", "has_gps", "altitude",
+                     "sync_time_diff", "ground_distance",
+                     "drone_lat", "drone_lon", "drone_alt", "position_source")
 
 
 class ConnectionDialog(QDialog):
@@ -314,6 +323,9 @@ class MainWindow(QMainWindow):
         # With projection enabled, a GPS-less detection is intentionally not
         # mapped until the second POST supplies a positive depth distance.
         if result["should_map"]:
+            # The projected position is the UI's own work, so write it back to
+            # the record before anything derived from it is stored.
+            self._store_projection(detection)
             self.map_widget.add_detection(detection)
             # The object now has a position, so ask which checkpoints are
             # within reach of it.
@@ -398,9 +410,64 @@ class MainWindow(QMainWindow):
                 result["checkpoints"] = checkpoints_from_response(payload)
                 result["checkpoint_count"] = payload.get(
                     "checkpoint_count", len(result["checkpoints"]))
+
+            # Written here, on the worker, so the disk write stays off the UI
+            # thread; the record store has its own locks.
+            self._store_checkpoints(detection, result)
             self.checkpoints_ready.emit(result)
 
         threading.Thread(target=run, daemon=True).start()
+
+    def _store_projection(self, detection):
+        """Persist the projected object position onto the detection's record."""
+        server = getattr(self, "detection_server", None)
+        if server is None:
+            return
+        fields = {k: detection[k] for k in PROJECTION_FIELDS if k in detection}
+        try:
+            server.update_record(detection, fields)
+        except Exception as exc:      # never let a write break detection flow
+            print(f"[detection] could not write the projected position to the "
+                  f"record: {exc}")
+
+    def _store_checkpoints(self, detection, result):
+        """Save the lookup's outcome onto this detection's JSON record.
+
+        Lands in detection_records/<image_file>.json under
+        ``nearby_checkpoints``, alongside the detection it belongs to, and is
+        appended to the detections.jsonl event log. A failed lookup is
+        recorded too, so the record says the query ran and did not answer
+        rather than looking like it was never made.
+        """
+        server = getattr(self, "detection_server", None)
+        if server is None:
+            return
+
+        stored = {
+            "status": "failed" if result.get("failed") else "ok",
+            "queried_at": datetime.now().isoformat(timespec="seconds"),
+            "center": result.get("center"),
+            "radius_m": result.get("radius_m"),
+            "radius_source": ("equipment_max_range_km"
+                              if result.get("used_equipment_range")
+                              else "default_radius"),
+            "checkpoint_count": result.get("checkpoint_count", 0),
+            "checkpoints": result.get("checkpoints") or [],
+        }
+
+        try:
+            updated = server.attach_checkpoints(detection, stored)
+        except Exception as exc:      # a bad write must not kill the worker
+            print(f"[checkpoints] could not write the result to the "
+                  f"detection record: {exc}")
+            return
+
+        if updated is None:
+            print("[checkpoints] no stored detection matched this lookup, so "
+                  "the result was not written to JSON")
+        else:
+            print(f"[checkpoints] saved to the record for "
+                  f"{detection.get('image_file') or updated.get('id')}")
 
     @pyqtSlot(dict)
     def _on_checkpoints_ready(self, data):
