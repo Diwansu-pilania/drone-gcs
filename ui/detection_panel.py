@@ -1,7 +1,7 @@
 """Detection panel - scrollable list of detected objects with thumbnails"""
 from PyQt6.QtWidgets import (QWidget, QVBoxLayout, QHBoxLayout, QLabel,
                               QScrollArea, QFrame, QPushButton, QGroupBox)
-from PyQt6.QtCore import Qt, pyqtSlot
+from PyQt6.QtCore import Qt, pyqtSignal, pyqtSlot
 from PyQt6.QtGui import QPixmap, QImage
 import requests
 from datetime import datetime
@@ -9,6 +9,7 @@ from datetime import datetime
 from html import escape as html_escape
 
 from core.checkpoint_client import (checkpoint_distance_m, checkpoint_name)
+from core.response_client import pairing_summary
 from core.threat_score import score_detection
 
 
@@ -70,10 +71,16 @@ def equipment_rows(info):
 class DetectionItemWidget(QWidget):
     """Single detection item display; rebuilt in place when depth arrives."""
 
+    # (detection, decision, pairing) — raised when an operator clicks.
+    decision_made = pyqtSignal(dict, str, dict)
+
     def __init__(self, detection):
         super().__init__()
         self._thumb = None
         self._loaded_image_url = None
+        self._response_payload = None
+        self._decision = None
+        self._decided_by = None
         self._init_ui()
         self.set_data(detection)
         self.setStyleSheet("""
@@ -132,6 +139,48 @@ class DetectionItemWidget(QWidget):
             "padding: 4px 6px;")
         self._equip.setVisible(False)
         outer.addWidget(self._equip)
+
+        # Recommended response, and the decision an operator must make on it.
+        self._response = QLabel()
+        self._response.setWordWrap(True)
+        self._response.setTextFormat(Qt.TextFormat.RichText)
+        self._response.setStyleSheet(
+            "font-size: 11px; background: #EDE7F6; border-left: 3px solid #5E35B1;"
+            "padding: 4px 6px;")
+        self._response.setVisible(False)
+        outer.addWidget(self._response)
+
+        # Kept apart from the text above: a decision needs a deliberate click,
+        # not a link buried in a paragraph.
+        self._auth_row = QWidget()
+        auth_layout = QHBoxLayout(self._auth_row)
+        auth_layout.setContentsMargins(0, 0, 0, 4)
+        auth_layout.setSpacing(6)
+
+        self._authorize_btn = QPushButton("Authorize response")
+        self._authorize_btn.setStyleSheet("""
+            QPushButton { background: #2E7D32; color: white; border: none;
+                          padding: 6px 10px; border-radius: 3px;
+                          font-weight: bold; }
+            QPushButton:hover { background: #1B5E20; }
+            QPushButton:disabled { background: #bdbdbd; }
+        """)
+        self._authorize_btn.clicked.connect(self._on_authorize)
+
+        self._reject_btn = QPushButton("Reject")
+        self._reject_btn.setStyleSheet("""
+            QPushButton { background: #eeeeee; color: #333; border: 1px solid #ccc;
+                          padding: 6px 10px; border-radius: 3px; }
+            QPushButton:hover { background: #e0e0e0; }
+            QPushButton:disabled { color: #999; }
+        """)
+        self._reject_btn.clicked.connect(self._on_reject)
+
+        auth_layout.addWidget(self._authorize_btn)
+        auth_layout.addWidget(self._reject_btn)
+        auth_layout.addStretch()
+        self._auth_row.setVisible(False)
+        outer.addWidget(self._auth_row)
 
         # Checkpoints returned by the /nearby lookup for this object.
         self._checkpoints = QLabel()
@@ -277,6 +326,131 @@ class DetectionItemWidget(QWidget):
         self._threat.setText(html)
         self._threat.setVisible(True)
 
+    def set_response(self, payload):
+        """Show the recommended checkpoint-drone pairing, and why.
+
+        ``payload`` is what the peer returned. A reply with no feasible
+        pairing is shown too, with the service's stated reason: "nothing to
+        send" is an operational fact, not an empty panel.
+        """
+        self._response_payload = payload
+        if not payload:
+            self._response.clear()
+            self._response.setVisible(False)
+            self._auth_row.setVisible(False)
+            return
+
+        best = payload.get("recommended") if isinstance(payload, dict) else None
+
+        if not best:
+            why = (payload.get("no_options_because")
+                   or "no feasible checkpoint-drone pairing")
+            excluded = payload.get("excluded") or []
+            html = ("<b style='color:#4527A0;'>🚁 No response available</b>"
+                    f"<br/><span style='color:#555;'>{html_escape(str(why))}"
+                    "</span>")
+            # Name what was ruled out and why, so this is diagnosable.
+            for entry in excluded[:4]:
+                if not isinstance(entry, dict):
+                    continue
+                html += (f"<br/><span style='color:#999;'>· "
+                         f"{html_escape(str(entry.get('drone_name') or 'drone'))}"
+                         f": {html_escape('; '.join(entry.get('reasons') or []))}"
+                         f"</span>")
+            if len(excluded) > 4:
+                html += (f"<br/><span style='color:#999;'>· "
+                         f"+{len(excluded) - 4} more ruled out</span>")
+            self._response.setText(html)
+            self._response.setVisible(True)
+            self._auth_row.setVisible(False)
+            return
+
+        eta = best.get("eta_min")
+        score = best.get("score")
+        html = (f"<b style='color:#4527A0;'>🚁 "
+                f"{html_escape(pairing_summary(best))}</b>")
+        bits = []
+        if score is not None:
+            bits.append(f"score {float(score):.0f}/100")
+        if eta is not None:
+            bits.append(f"overhead in ~{float(eta):.0f} min")
+        if bits:
+            html += (f"<br/><span style='color:#555;'>"
+                     f"{html_escape(' · '.join(bits))}</span>")
+
+        for line in (best.get("why") or [])[:4]:
+            html += (f"<br/><span style='color:#666;'>· "
+                     f"{html_escape(str(line))}</span>")
+
+        why_best = best.get("why_best") or []
+        if why_best:
+            html += ("<br/><span style='color:#4527A0;'><b>Why this one:</b>"
+                     "</span>")
+            for line in why_best[:3]:
+                html += (f"<br/><span style='color:#666;'>· "
+                         f"{html_escape(str(line))}</span>")
+
+        others = max(0, len(payload.get("options") or []) - 1)
+        if others:
+            html += (f"<br/><span style='color:#999;'>{others} other feasible "
+                     f"pairing{'' if others == 1 else 's'}</span>")
+
+        self._response.setText(html)
+        self._response.setVisible(True)
+
+        # A decision is only offered while none has been made.
+        if self._decision is None:
+            self._authorize_btn.setEnabled(True)
+            self._reject_btn.setEnabled(True)
+            self._auth_row.setVisible(True)
+        else:
+            self._show_decision(self._decision, self._decided_by)
+
+    def _on_authorize(self):
+        self._decide("approved")
+
+    def _on_reject(self):
+        self._decide("rejected")
+
+    def _decide(self, decision):
+        """Hand an operator's decision to the panel, which sends it."""
+        best = (self._response_payload or {}).get("recommended")
+        if not best:
+            return
+        # Disabled immediately so one click is one decision, whatever the
+        # network does next.
+        self._authorize_btn.setEnabled(False)
+        self._reject_btn.setEnabled(False)
+        self.decision_made.emit(self.detection, decision, best)
+
+    def _show_decision(self, decision, who):
+        """Replace the buttons with what was decided, by whom."""
+        self._decision = decision
+        self._decided_by = who
+        colour = "#2E7D32" if decision == "approved" else "#C62828"
+        word = "AUTHORIZED" if decision == "approved" else "REJECTED"
+        self._auth_row.setVisible(False)
+        current = self._response.text()
+        self._response.setText(
+            current + f"<br/><b style='color:{colour};'>{word}</b>"
+            f"<span style='color:#555;'> by {html_escape(str(who))}</span>")
+
+    def set_decision(self, decision, who, ok=True):
+        """Record the outcome of sending a decision."""
+        if ok:
+            self._show_decision(decision, who)
+            return
+        # It was not recorded, so the decision is still open.
+        self._decision = None
+        self._authorize_btn.setEnabled(True)
+        self._reject_btn.setEnabled(True)
+        self._auth_row.setVisible(True)
+        self._response.setText(
+            self._response.text()
+            + "<br/><b style='color:#C62828;'>Not recorded</b>"
+              "<span style='color:#555;'> — the service did not accept the "
+              "decision; see the console. Try again.</span>")
+
     def set_checkpoints(self, data):
         """Show the /nearby result for this detection.
 
@@ -393,6 +567,10 @@ class DetectionItemWidget(QWidget):
 class DetectionPanel(QWidget):
     """Panel displaying list of all detected objects"""
 
+    # (detection, decision, pairing) — forwarded from whichever item was
+    # clicked, for the window to send to the service.
+    decision_made = pyqtSignal(dict, str, dict)
+
     def __init__(self):
         super().__init__()
         self.detections = []
@@ -444,6 +622,7 @@ class DetectionPanel(QWidget):
             return
 
         item = DetectionItemWidget(detection_data)
+        item.decision_made.connect(self.decision_made)
         self._items[key] = item
         self.detections.append(detection_data)
         self.list_layout.insertWidget(0, item)   # newest first
@@ -456,6 +635,18 @@ class DetectionPanel(QWidget):
         item = self._items.get(key)
         if item is not None:
             item.set_checkpoints(data)
+
+    def set_response(self, key, payload):
+        """Route a response recommendation to its detection item."""
+        item = self._items.get(key)
+        if item is not None:
+            item.set_response(payload)
+
+    def set_decision(self, key, decision, who, ok=True):
+        """Report whether an operator's decision was recorded."""
+        item = self._items.get(key)
+        if item is not None:
+            item.set_decision(decision, who, ok)
 
     def clear_detections(self):
         """Remove all detections"""
