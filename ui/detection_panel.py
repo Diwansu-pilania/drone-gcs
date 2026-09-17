@@ -133,6 +133,16 @@ class DetectionItemWidget(QWidget):
         self._equip.setVisible(False)
         outer.addWidget(self._equip)
 
+        # The response drone chosen for this object.
+        self._drone = QLabel()
+        self._drone.setWordWrap(True)
+        self._drone.setTextFormat(Qt.TextFormat.RichText)
+        self._drone.setStyleSheet(
+            "font-size: 11px; background: #E8EAF6; border-left: 3px solid #3949AB;"
+            "padding: 4px 6px;")
+        self._drone.setVisible(False)
+        outer.addWidget(self._drone)
+
         # Checkpoints returned by the /nearby lookup for this object.
         self._checkpoints = QLabel()
         self._checkpoints.setWordWrap(True)
@@ -276,6 +286,79 @@ class DetectionItemWidget(QWidget):
 
         self._threat.setText(html)
         self._threat.setVisible(True)
+
+    def set_response_drone(self, result):
+        """Show the drone chosen to respond to this object, and why.
+
+        ``result`` is what drone_selection returned. A result with nothing
+        feasible is shown too, naming what was ruled out: "no drone can
+        respond" is an operational fact, not an empty panel.
+        """
+        if not result:
+            self._drone.clear()
+            self._drone.setVisible(False)
+            return
+
+        selected = result.get("selected")
+        excluded = result.get("excluded") or []
+
+        if not selected:
+            reason = result.get("unavailable_because")
+            html = "<b style='color:#283593;'>🚁 No response drone available</b>"
+            if reason:
+                html += (f"<br/><span style='color:#555;'>"
+                         f"{html_escape(str(reason))}</span>")
+            for entry in excluded[:4]:
+                html += (f"<br/><span style='color:#999;'>· "
+                         f"{html_escape(str(entry.get('drone_name') or 'drone'))}"
+                         f": {html_escape('; '.join(entry.get('reasons') or []))}"
+                         f"</span>")
+            if len(excluded) > 4:
+                html += (f"<br/><span style='color:#999;'>· "
+                         f"+{len(excluded) - 4} more ruled out</span>")
+            self._drone.setText(html)
+            self._drone.setVisible(True)
+            return
+
+        name = selected.get("drone_name") or f"drone {selected.get('drone_id')}"
+        html = f"<b style='color:#283593;'>🚁 {html_escape(str(name))}</b>"
+
+        bits = []
+        if selected.get("type_of_drone"):
+            bits.append(str(selected["type_of_drone"]))
+        if selected.get("score") is not None:
+            bits.append(f"score {float(selected['score']):.0f}/100")
+        if selected.get("eta_min") is not None:
+            bits.append(f"overhead in ~{float(selected['eta_min']):.0f} min")
+        if bits:
+            html += (f"<br/><span style='color:#555;'>"
+                     f"{html_escape(' · '.join(bits))}</span>")
+
+        for line in (selected.get("why") or [])[:4]:
+            html += (f"<br/><span style='color:#666;'>· "
+                     f"{html_escape(str(line))}</span>")
+
+        why_best = selected.get("why_best") or []
+        if why_best:
+            html += ("<br/><span style='color:#283593;'><b>Why this one:</b>"
+                     "</span>")
+            for line in why_best[:3]:
+                html += (f"<br/><span style='color:#666;'>· "
+                         f"{html_escape(str(line))}</span>")
+
+        others = max(0, len(result.get("candidates") or []) - 1)
+        tail = []
+        if others:
+            tail.append(f"{others} other drone{'' if others == 1 else 's'} "
+                        f"could respond")
+        if excluded:
+            tail.append(f"{len(excluded)} ruled out")
+        if tail:
+            html += (f"<br/><span style='color:#999;'>"
+                     f"{html_escape(' · '.join(tail))}</span>")
+
+        self._drone.setText(html)
+        self._drone.setVisible(True)
 
     def set_checkpoints(self, data):
         """Show the /nearby result for this detection.
@@ -456,6 +539,12 @@ class DetectionPanel(QWidget):
         item = self._items.get(key)
         if item is not None:
             item.set_checkpoints(data)
+
+    def set_response_drone(self, key, result):
+        """Route a chosen response drone to its detection item."""
+        item = self._items.get(key)
+        if item is not None:
+            item.set_response_drone(result)
 
     def clear_detections(self):
         """Remove all detections"""

@@ -2,3 +2,6 @@ __pycache__
 app_run.log
 detection_images
 map_tiles
+
+# Database credentials. Never commit this file.
+.env

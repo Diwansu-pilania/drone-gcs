@@ -180,3 +180,21 @@ THREAT_BANDS = (
     (25.0, "MODERATE"),
     (0.0, "LOW"),
 )
+
+# --- Response drone selection ----------------------------------------------
+# Picks the most suitable drone from the shooter_drones table for a detected
+# object, and shows it on that object in the detection panel.
+#
+# The connection string is NOT here. config.py is committed, and a database
+# credential in a repository is a credential given to everyone who can read
+# it. core/drone_db.py reads DRONE_DATABASE_URL (or DATABASE_URL) from the
+# environment, or from a .env file in the project root — see .env.example.
+DRONE_SELECTION_ENABLED = True
+
+# How far out to consider drones, in metres. A drone beyond its own
+# operational range is rejected by the scoring with a stated reason, so this
+# only bounds the query.
+DRONE_SEARCH_RADIUS_M = 100000.0
+
+# Most rows to bring back from one lookup.
+DRONE_SEARCH_LIMIT = 50
