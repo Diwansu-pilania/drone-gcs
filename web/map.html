@@ -19,6 +19,13 @@
         .checkpoint-popup strong { color: #00897B; font-size: 14px; }
         .checkpoint-popup .info-row { margin: 3px 0; }
         .checkpoint-popup .muted { color: #666; font-size: 12px; }
+        .equipment-block { margin: 6px 0; padding: 6px 8px; border-left: 3px solid #FF9800;
+                           background: #FFF8E1; border-radius: 3px; }
+        .equipment-block .equipment-title { font-weight: bold; color: #E65100; }
+        .equipment-block .equipment-grid { display: grid; grid-template-columns: auto 1fr;
+                                           gap: 1px 8px; margin-top: 3px; font-size: 12px; }
+        .equipment-block .equipment-label { color: #666; white-space: nowrap; }
+        .equipment-block .equipment-value { color: #222; }
     </style>
 </head>
 <body>
@@ -224,6 +231,64 @@
             img.src = imageUrl;
         }
 
+        // Render the detector's equipment_info block for a detection popup.
+        // Known fields are shown first, in a deliberate order with their
+        // units; anything else the detector adds later is still listed rather
+        // than silently dropped, so new metadata needs no change here.
+        var EQUIPMENT_FIELDS = [
+            ['category', 'Category', ''],
+            ['domain', 'Domain', ''],
+            ['mobility_type', 'Mobility', ''],
+            ['caliber_mm', 'Caliber', ' mm'],
+            ['max_range_km', 'Max range', ' km'],
+            ['pp_kg', 'PP', ' kg'],
+            ['score', 'Score', '']
+        ];
+
+        function prettyFieldName(key) {
+            return String(key).replace(/_/g, ' ')
+                .replace(/^./, function(c) { return c.toUpperCase(); });
+        }
+
+        function equipmentInfoHtml(info) {
+            if (!info || typeof info !== 'object' || Array.isArray(info)) { return ''; }
+
+            var shown = {name: true};
+            var rows = '';
+
+            EQUIPMENT_FIELDS.forEach(function(field) {
+                var key = field[0], label = field[1], unit = field[2];
+                shown[key] = true;
+                var value = info[key];
+                if (value === null || value === undefined || value === '') { return; }
+                rows += '<div class="equipment-label">' + escapeHtml(label) + '</div>' +
+                        '<div class="equipment-value">' + escapeHtml(value) +
+                        escapeHtml(unit) + '</div>';
+            });
+
+            // Any field the detector starts sending that is not listed above.
+            Object.keys(info).forEach(function(key) {
+                if (shown[key]) { return; }
+                var value = info[key];
+                if (value === null || value === undefined || value === '') { return; }
+                if (typeof value === 'object') { return; }
+                rows += '<div class="equipment-label">' + escapeHtml(prettyFieldName(key)) +
+                        '</div><div class="equipment-value">' + escapeHtml(value) + '</div>';
+            });
+
+            var name = info.name;
+            if (!rows && (name === null || name === undefined || name === '')) { return ''; }
+
+            var html = '<div class="equipment-block">';
+            html += '<div class="equipment-title">🛠 ' +
+                    escapeHtml(name || 'Equipment') + '</div>';
+            if (rows) {
+                html += '<div class="equipment-grid">' + rows + '</div>';
+            }
+            html += '</div>';
+            return html;
+        }
+
         // Add detection marker from Qt
         window.addDetection = function(detectionData) {
             var lat = detectionData.latitude;
@@ -239,6 +304,7 @@
             var syncTimeDiff = detectionData.sync_time_diff;
             var groundDistance = detectionData.ground_distance;
             var positionSource = detectionData.position_source;
+            var equipmentInfo = detectionData.equipment_info;
             var droneLat = detectionData.drone_lat;
             var droneLon = detectionData.drone_lon;
             var droneAlt = detectionData.drone_alt;
@@ -284,6 +350,10 @@
 
             popupContent += '<div class="info">';
             popupContent += '<div class="info-row"><strong>' + objectClass + '</strong> (' + (confidence * 100).toFixed(1) + '%)</div>';
+
+            // What the object IS, straight from the detector, before the
+            // where/how-far geometry below.
+            popupContent += equipmentInfoHtml(equipmentInfo);
 
             var timeStr = timestamp ? new Date(timestamp).toLocaleString() : 'Unknown';
             popupContent += '<div class="info-row">📅 Time: ' + timeStr + '</div>';
