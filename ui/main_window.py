@@ -18,8 +18,6 @@ from core.checkpoint_client import (checkpoint_name,
                                     equipment_max_range_km,
                                     fetch_nearby_checkpoints,
                                     radius_from_equipment)
-from core.response_client import authorize_response, request_recommendation
-from core.threat_score import score_detection
 from core.tile_server import TileCacheGroup
 from ui.map_widget import MapWidget
 from ui.telemetry_panel import TelemetryPanel
@@ -133,11 +131,6 @@ class MainWindow(QMainWindow):
     # Emitted from the checkpoint worker thread so the markers are drawn on the
     # Qt thread. Touching widgets straight from the worker would be unsafe.
     checkpoints_ready = pyqtSignal(dict)
-
-    # Response recommendation, and the outcome of recording a decision. Both
-    # come back from worker threads, so they cross to the Qt thread here.
-    recommendation_ready = pyqtSignal(dict)
-    decision_recorded = pyqtSignal(dict)
 
     def __init__(self):
         super().__init__()
@@ -268,9 +261,6 @@ class MainWindow(QMainWindow):
         # Map updates from telemetry are handled by the timer; the checkpoint
         # results arrive from a worker thread and are drawn here.
         self.checkpoints_ready.connect(self._on_checkpoints_ready)
-        self.recommendation_ready.connect(self._on_recommendation_ready)
-        self.decision_recorded.connect(self._on_decision_recorded)
-        self.detection_panel.decision_made.connect(self._on_decision_made)
 
     def _show_connection_dialog(self):
         """Show connection dialog and connect"""
@@ -430,11 +420,6 @@ class MainWindow(QMainWindow):
             self._store_checkpoints(detection, result)
             self.checkpoints_ready.emit(result)
 
-            # The recommendation needs the threat score, which needs the
-            # checkpoint count, so it follows on the same worker rather than
-            # racing it from another one.
-            self._request_recommendation(detection, result)
-
         threading.Thread(target=run, daemon=True).start()
 
     def _store_projection(self, detection):
@@ -490,134 +475,6 @@ class MainWindow(QMainWindow):
         else:
             print(f"[checkpoints] saved to the record for "
                   f"{detection.get('image_file') or updated.get('id')}")
-
-    def _request_recommendation(self, detection, checkpoint_result):
-        """Ask the peer which checkpoint-drone pairing should respond.
-
-        Runs on the checkpoint worker, after the /nearby result is folded in:
-        the threat score depends on the checkpoint count, and the service
-        stores the score with any authorisation.
-        """
-        api_base = getattr(config, "RESPONSE_API_BASE", "")
-        if not api_base:
-            return
-
-        latitude = detection.get("latitude")
-        longitude = detection.get("longitude")
-        radius_m = checkpoint_result.get("radius_m")
-        if latitude is None or longitude is None or not radius_m:
-            return
-
-        # Score the detection as the panel sees it, checkpoints included.
-        scored_on = dict(detection)
-        if not checkpoint_result.get("failed"):
-            scored_on["nearby_checkpoints"] = {
-                "status": "ok",
-                "radius_m": radius_m,
-                "checkpoint_count": checkpoint_result.get("checkpoint_count", 0),
-                "checkpoints": checkpoint_result.get("checkpoints") or [],
-            }
-        try:
-            threat = score_detection(scored_on)
-        except Exception as exc:
-            print(f"[response] could not score before recommending: {exc}")
-            threat = {"score": None, "band": None}
-
-        error = {}
-        payload = request_recommendation(
-            api_base, latitude, longitude, radius_m,
-            threat_score=threat.get("score"),
-            threat_band=threat.get("band"),
-            object_class=(detection.get("object_class")
-                          or detection.get("class")),
-            detection_ref=detection.get("image_file"),
-            drone_search_radius_m=getattr(
-                config, "RESPONSE_DRONE_SEARCH_RADIUS_M", None),
-            timeout=getattr(config, "RESPONSE_API_TIMEOUT", 30.0),
-            error_out=error)
-
-        self.recommendation_ready.emit({
-            "key": detection_key(detection),
-            "payload": payload,
-            "error": error,
-        })
-
-    @pyqtSlot(dict)
-    def _on_recommendation_ready(self, data):
-        """Show the recommended pairing on the detection it belongs to."""
-        payload = data.get("payload")
-        self.detection_panel.set_response(data.get("key"), payload)
-
-        if payload is None:
-            message = (data.get("error") or {}).get("message", "")
-            print(f"[response] no recommendation available. {message}")
-            return
-
-        best = payload.get("recommended")
-        if best:
-            self.statusBar().showMessage(
-                f"Response suggested: {best.get('drone_name')} from "
-                f"{best.get('checkpoint_name')} "
-                f"(score {best.get('score')}, ETA {best.get('eta_min')} min) "
-                f"— awaiting authorization")
-        else:
-            self.statusBar().showMessage(
-                f"No response available: "
-                f"{payload.get('no_options_because', 'no feasible pairing')}")
-
-    @pyqtSlot(dict, str, dict)
-    def _on_decision_made(self, detection, decision, pairing):
-        """Send an operator's decision to the service, off the Qt thread."""
-        api_base = getattr(config, "RESPONSE_API_BASE", "")
-        who = getattr(config, "OPERATOR_NAME", "") or "unknown-operator"
-        key = detection_key(detection)
-
-        if not api_base:
-            print("[response] no RESPONSE_API_BASE, so the decision cannot "
-                  "be recorded")
-            self.decision_recorded.emit({"key": key, "decision": decision,
-                                         "who": who, "ok": False})
-            return
-
-        threat_score = None
-        try:
-            threat_score = score_detection(detection).get("score")
-        except Exception:
-            pass
-
-        def run():
-            error = {}
-            result = authorize_response(
-                api_base, decision, who,
-                checkpoint_id=pairing.get("checkpoint_id"),
-                drone_id=pairing.get("drone_id"),
-                detection_ref=detection.get("image_file"),
-                threat_score=threat_score,
-                recommendation=pairing,
-                timeout=getattr(config, "RESPONSE_API_TIMEOUT", 30.0),
-                error_out=error)
-            self.decision_recorded.emit({
-                "key": key, "decision": decision, "who": who,
-                "ok": result is not None, "error": error,
-            })
-
-        threading.Thread(target=run, daemon=True).start()
-
-    @pyqtSlot(dict)
-    def _on_decision_recorded(self, data):
-        """Report whether the decision reached the service."""
-        ok = bool(data.get("ok"))
-        decision, who = data.get("decision"), data.get("who")
-        self.detection_panel.set_decision(data.get("key"), decision, who, ok)
-
-        if ok:
-            self.statusBar().showMessage(
-                f"Response {decision} by {who} — recorded")
-        else:
-            message = (data.get("error") or {}).get("message", "")
-            self.statusBar().showMessage(
-                f"Could not record the {decision} decision — not authorized")
-            print(f"[response] decision NOT recorded: {message}")
 
     @pyqtSlot(dict)
     def _on_checkpoints_ready(self, data):

@@ -180,26 +180,3 @@ THREAT_BANDS = (
     (25.0, "MODERATE"),
     (0.0, "LOW"),
 )
-
-# --- Response recommendation ----------------------------------------------
-# The database machine ranks checkpoint-drone pairings and answers with the
-# best one; the GCS holds no database credentials. Defaults to the same peer
-# as the checkpoint lookup, so there is usually nothing to set here.
-RESPONSE_API_BASE = CHECKPOINT_API_BASE
-
-# Seconds to wait. It runs two spatial queries and opens a database
-# connection per request, so allow at least as long as the checkpoint lookup.
-RESPONSE_API_TIMEOUT = 30.0
-
-# How far out to consider drones, in metres. None lets the service choose.
-RESPONSE_DRONE_SEARCH_RADIUS_M = 50000.0
-
-# Who is recorded as accountable when a response is authorised from this GCS.
-# Falls back to the operating-system user; set it explicitly for a shared
-# console, where "the machine's login" is not a person.
-import getpass as _getpass  # noqa: E402  (kept beside the setting it feeds)
-
-try:
-    OPERATOR_NAME = _getpass.getuser()
-except Exception:
-    OPERATOR_NAME = "unknown-operator"
