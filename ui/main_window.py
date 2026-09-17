@@ -24,6 +24,7 @@ from core.tile_server import TileCacheGroup
 from ui.map_widget import MapWidget
 from ui.telemetry_panel import TelemetryPanel
 from ui.detection_panel import DetectionPanel, detection_key
+from ui import theme
 import config
 
 
@@ -142,6 +143,9 @@ class MainWindow(QMainWindow):
         super().__init__()
         self.setWindowTitle("Drone GCS - Real-Time Dashboard")
         self.setGeometry(100, 100, 1400, 800)
+        # One stylesheet for the window, so every panel shares a look rather
+        # than each carrying its own colours.
+        self.setStyleSheet(theme.APP_STYLESHEET)
 
         # Core components
         self.vehicle_state = VehicleState()

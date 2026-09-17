@@ -12,6 +12,7 @@ from html import escape as html_escape
 
 from core.checkpoint_client import (checkpoint_distance_m, checkpoint_name)
 from core.threat_score import score_detection
+from ui import theme
 
 
 class ClickableWidget(QWidget):
@@ -29,14 +30,8 @@ class ClickableWidget(QWidget):
         super().mouseReleaseEvent(event)
 
 
-BAND_COLOURS = {
-    "CRITICAL": "#C62828",
-    "HIGH": "#EF6C00",
-    "MODERATE": "#F9A825",
-    "LOW": "#2E7D32",
-    "UNSCORED": "#9E9E9E",
-}
-BAND_COLOUR_DEFAULT = "#555555"
+BAND_COLOURS = theme.BAND_COLOURS
+BAND_COLOUR_DEFAULT = theme.BAND_DEFAULT
 
 
 def detection_key(d):
@@ -104,16 +99,25 @@ class DetectionItemWidget(QWidget):
         self._checkpoint_summary = None
         self._init_ui()
         self.set_data(detection)
-        self.setStyleSheet("""
-            DetectionItemWidget {
-                background: white;
-                border: 1px solid #e0e0e0;
-                border-radius: 4px;
-            }
-            DetectionItemWidget:hover {
-                background: #f5f5f5;
-                border: 1px solid #2196F3;
-            }
+        # Each detection is a card, so the list can be scanned rather than
+        # read. Two things are needed for that surface to actually appear:
+        # a QWidget subclass paints no stylesheet background unless told to,
+        # and the children must not paint the window background over it. The
+        # detail sections keep their own surface regardless, since a widget's
+        # own stylesheet wins over an ancestor's.
+        self.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
+        self.setStyleSheet(f"""
+            DetectionItemWidget {{
+                background: {theme.SURFACE};
+                border: 1px solid {theme.BORDER};
+                border-radius: 3px;
+            }}
+            DetectionItemWidget:hover {{
+                border: 1px solid {theme.BORDER_STRONG};
+            }}
+            DetectionItemWidget QWidget {{
+                background: transparent;
+            }}
         """)
 
     def _init_ui(self):
@@ -134,29 +138,40 @@ class DetectionItemWidget(QWidget):
 
         self._thumb = QLabel()
         self._thumb.setFixedSize(80, 60)
-        self._thumb.setStyleSheet("border: 1px solid #ccc; background: #f5f5f5;")
+        self._thumb.setStyleSheet(
+            f"border: 1px solid {theme.BORDER_STRONG}; background: {theme.BG};")
         self._thumb.setScaledContents(True)
         self._thumb.setAlignment(Qt.AlignmentFlag.AlignCenter)
         row.addWidget(self._thumb)
 
         info = QVBoxLayout()
         self._title = QLabel()
-        self._dist = QLabel();  self._dist.setStyleSheet("font-size: 11px; color: #666;")
-        self._pos = QLabel();   self._pos.setStyleSheet("font-size: 11px; color: #666;")
-        self._alt = QLabel();   self._alt.setStyleSheet("font-size: 11px; color: #666;")
-        self._time = QLabel();  self._time.setStyleSheet("font-size: 11px; color: #999;")
+        for name in ("_dist", "_pos", "_alt", "_time"):
+            widget = QLabel()
+            widget.setTextFormat(Qt.TextFormat.RichText)
+            setattr(self, name, widget)
         # The at-a-glance line: what the detail would have said, in one row.
         self._summary = QLabel()
         self._summary.setTextFormat(Qt.TextFormat.RichText)
-        self._summary.setStyleSheet("font-size: 11px;")
+
+        # The detection time sits last and right-aligned, against the card's
+        # bottom edge: it is how an operator tells a fresh contact from an old
+        # one, but it is the least urgent thing on the card. It keeps its own
+        # line rather than riding beside the title, because a long class name
+        # would otherwise push the card wider than the panel.
+        self._time.setAlignment(Qt.AlignmentFlag.AlignRight
+                                | Qt.AlignmentFlag.AlignVCenter)
+
         for w in (self._title, self._summary, self._dist, self._pos, self._alt,
                   self._time):
             info.addWidget(w)
         row.addLayout(info, 1)
 
         # Which way this item is about to move, at the right of the header.
-        self._chevron = QLabel("▸")
-        self._chevron.setStyleSheet("font-size: 14px; color: #888;")
+        # A caret, not an icon: it points where the item is about to go.
+        self._chevron = QLabel("\u203a")
+        self._chevron.setStyleSheet(
+            f"font-size: 15px; color: {theme.TEXT_MUTED}; font-weight: bold;")
         self._chevron.setAlignment(Qt.AlignmentFlag.AlignTop
                                    | Qt.AlignmentFlag.AlignRight)
         self._chevron.setFixedWidth(14)
@@ -175,7 +190,7 @@ class DetectionItemWidget(QWidget):
         self._threat = QLabel()
         self._threat.setWordWrap(True)
         self._threat.setTextFormat(Qt.TextFormat.RichText)
-        self._threat.setStyleSheet("padding: 2px 1px;")
+        self._threat.setStyleSheet(theme.section_style(theme.TEXT_MUTED))
         self._threat.setVisible(False)
         outer.addWidget(self._threat)
 
@@ -183,9 +198,7 @@ class DetectionItemWidget(QWidget):
         self._equip = QLabel()
         self._equip.setWordWrap(True)
         self._equip.setTextFormat(Qt.TextFormat.RichText)
-        self._equip.setStyleSheet(
-            "font-size: 11px; background: #FFF8E1; border-left: 3px solid #FF9800;"
-            "padding: 4px 6px;")
+        self._equip.setStyleSheet(theme.section_style(theme.ACCENT_EQUIPMENT))
         self._equip.setVisible(False)
         outer.addWidget(self._equip)
 
@@ -193,21 +206,22 @@ class DetectionItemWidget(QWidget):
         self._drone = QLabel()
         self._drone.setWordWrap(True)
         self._drone.setTextFormat(Qt.TextFormat.RichText)
-        self._drone.setStyleSheet(
-            "font-size: 11px; background: #E8EAF6; border-left: 3px solid #3949AB;"
-            "padding: 4px 6px;")
+        self._drone.setStyleSheet(theme.section_style(theme.ACCENT_RESPONSE))
         self._drone.setVisible(False)
         outer.addWidget(self._drone)
 
         # Authorisation: records WHO approved this response, in this window.
         # It sends nothing and dispatches nothing — see _on_authorize.
-        self._authorize_btn = QPushButton("Authorize response")
-        self._authorize_btn.setStyleSheet("""
-            QPushButton { background: #283593; color: white; border: none;
-                          padding: 6px 10px; border-radius: 3px;
-                          font-weight: bold; }
-            QPushButton:hover { background: #1A237E; }
-            QPushButton:disabled { background: #bdbdbd; }
+        self._authorize_btn = QPushButton("AUTHORIZE RESPONSE")
+        self._authorize_btn.setStyleSheet(f"""
+            QPushButton {{ background: transparent; color: {theme.ACCENT_RESPONSE};
+                           border: 1px solid {theme.ACCENT_RESPONSE};
+                           padding: 6px 10px; border-radius: 2px;
+                           font-size: {theme.SIZE_SMALL}px; letter-spacing: 1px; }}
+            QPushButton:hover {{ background: {theme.ACCENT_RESPONSE};
+                                 color: {theme.BG}; }}
+            QPushButton:disabled {{ color: {theme.TEXT_MUTED};
+                                    border: 1px solid {theme.BORDER}; }}
         """)
         self._authorize_btn.clicked.connect(self._on_authorize)
         self._authorize_btn.setVisible(False)
@@ -217,9 +231,7 @@ class DetectionItemWidget(QWidget):
         self._checkpoints = QLabel()
         self._checkpoints.setWordWrap(True)
         self._checkpoints.setTextFormat(Qt.TextFormat.RichText)
-        self._checkpoints.setStyleSheet(
-            "font-size: 11px; background: #E0F2F1; border-left: 3px solid #00897B;"
-            "padding: 4px 6px;")
+        self._checkpoints.setStyleSheet(theme.section_style(theme.ACCENT_CHECKPOINT))
         self._checkpoints.setVisible(False)
         outer.addWidget(self._checkpoints)
 
@@ -240,22 +252,28 @@ class DetectionItemWidget(QWidget):
         if self._threat_summary:
             score, band = self._threat_summary
             colour = BAND_COLOURS.get(band, BAND_COLOUR_DEFAULT)
-            parts.append(f"<span style='color:{colour};font-weight:bold;'>"
-                         f"⚠ {score:.0f}</span>"
-                         f"<span style='color:#888;'>/100</span>")
+            parts.append(theme.value(f"{score:.0f}", size=theme.SIZE_SMALL,
+                                     colour=colour, bold=True)
+                         + theme.value("/100", size=theme.SIZE_TINY,
+                                       colour=theme.TEXT_MUTED)
+                         + "&nbsp;" + theme.chip(band, colour))
 
         if self._drone_summary:
-            parts.append(f"<span style='color:#3949AB;'>🚁 "
-                         f"{html_escape(self._drone_summary)}</span>")
+            parts.append(theme.value(html_escape(str(self._drone_summary).upper()),
+                                     size=theme.SIZE_TINY,
+                                     colour=theme.ACCENT_RESPONSE))
 
         if self._checkpoint_summary is not None:
-            parts.append(f"<span style='color:#00695C;'>🛡 "
-                         f"{self._checkpoint_summary}</span>")
+            parts.append(theme.value(f"{self._checkpoint_summary} CP",
+                                     size=theme.SIZE_TINY,
+                                     colour=theme.ACCENT_CHECKPOINT))
 
         if self._authorized_by:
-            parts.append("<span style='color:#2E7D32;'>✔ authorized</span>")
+            parts.append(theme.chip("authorized", theme.ACCENT_OK))
 
-        self._summary.setText(" · ".join(parts))
+        separator = theme.value("&nbsp;&nbsp;", size=theme.SIZE_TINY,
+                                colour=theme.TEXT_MUTED)
+        self._summary.setText(separator.join(parts))
         self._summary.setVisible(bool(parts) and not self._expanded)
 
     def toggle(self):
@@ -266,7 +284,7 @@ class DetectionItemWidget(QWidget):
         """Show or hide the detail, and point the chevron accordingly."""
         self._expanded = bool(expanded)
         self._details.setVisible(self._expanded)
-        self._chevron.setText("▾" if self._expanded else "▸")
+        self._chevron.setText("\u2304" if self._expanded else "\u203a")
         self._update_summary()
 
     def set_data(self, det):
@@ -274,9 +292,14 @@ class DetectionItemWidget(QWidget):
         self.detection = det
 
         obj_class = det.get("object_class") or det.get("class") or "unknown"
-        title = f"<b>{obj_class}</b> ({det.get('confidence', 0.0) * 100:.1f}%)"
+        title = (f"<span style=\"font-family:{theme.FONT_UI};"
+                 f"font-size:{theme.SIZE_TITLE}px;color:{theme.TEXT};"
+                 f"font-weight:600;letter-spacing:0.4px;\">"
+                 f"{html_escape(str(obj_class).upper())}</span>")
         if det.get("track_id") is not None:
-            title += f"  <span style='color:#888;'>#{det['track_id']}</span>"
+            title += "&nbsp;&nbsp;" + theme.value(
+                f"TRK {det['track_id']}", size=theme.SIZE_TINY,
+                colour=theme.TEXT_MUTED)
         self._title.setText(title)
 
         # Depth / distance to target
@@ -289,27 +312,48 @@ class DetectionItemWidget(QWidget):
         except (TypeError, ValueError):
             positive_distance = False
 
+        confidence_text = theme.value(
+            f"{det.get('confidence', 0.0) * 100:.1f}%", size=theme.SIZE_TINY,
+            colour=theme.TEXT_DIM)
         if positive_distance:
-            self._dist.setText(f"📏 {float(distance):.2f} m")
+            depth_text = theme.value(f"{float(distance):.2f} m",
+                                     size=theme.SIZE_TINY, colour=theme.TEXT_DIM)
         elif depth_status == "processing":
-            self._dist.setText("📏 depth processing…")
+            depth_text = theme.value("DEPTH PENDING", size=theme.SIZE_TINY,
+                                     colour=theme.TEXT_MUTED)
         elif depth_status == "error":
-            self._dist.setText("📏 depth error")
+            depth_text = theme.value("DEPTH ERROR", size=theme.SIZE_TINY,
+                                     colour=theme.ACCENT_ALERT)
         else:
-            self._dist.setText("")
+            depth_text = ""
+        divider = theme.value(" · ", size=theme.SIZE_TINY, colour=theme.TEXT_MUTED)
+        self._dist.setText(divider.join(
+            part for part in (confidence_text, depth_text) if part))
 
         # Position (only if the detection carried GPS)
         if det.get("has_gps"):
-            self._pos.setText(f"📍 {det['latitude']:.6f}, {det['longitude']:.6f}")
+            position = f"{det['latitude']:.6f}, {det['longitude']:.6f}"
+            colour = theme.TEXT_DIM
+            if det.get("position_source") == "default_center":
+                # An estimate, and it must not read like a surveyed fix.
+                position += "  EST"
+                colour = theme.BAND_COLOURS["MODERATE"]
+            self._pos.setText(theme.value(position, size=theme.SIZE_TINY,
+                                          colour=colour))
         else:
-            self._pos.setText("📍 No GPS")
+            self._pos.setText(theme.value("NO FIX", size=theme.SIZE_TINY,
+                                          colour=theme.TEXT_MUTED))
 
         if det.get("altitude"):
-            self._alt.setText(f"↕️ {det['altitude']:.1f} m")
+            self._alt.setText(theme.label("alt") + "&nbsp;" + theme.value(
+                f"{det['altitude']:.1f} m", size=theme.SIZE_TINY,
+                colour=theme.TEXT_DIM))
         else:
             self._alt.setText("")
 
-        self._time.setText(f"🕐 {self._format_time(det.get('timestamp'))}")
+        self._time.setText(theme.value(
+            self._format_time(det.get("timestamp")), size=theme.SIZE_TINY,
+            colour=theme.TEXT_MUTED))
 
         self._set_equipment(det.get("equipment_info"))
         self._set_threat(det)
@@ -329,17 +373,13 @@ class DetectionItemWidget(QWidget):
             self._equip.setVisible(False)
             return
 
-        html = (f"<b style='color:#E65100;'>🛠 "
-                f"{html_escape(str(name or 'Equipment'))}</b>")
+        html = theme.heading("equipment", theme.ACCENT_EQUIPMENT,
+                             trailing=theme.value(
+                                 html_escape(str(name or "UNKNOWN").upper()),
+                                 size=theme.SIZE_SMALL,
+                                 colour=theme.ACCENT_EQUIPMENT, bold=True))
         if rows:
-            html += "<table cellspacing='0' cellpadding='0' width='100%'>"
-            for label, value in rows:
-                html += (f"<tr>"
-                         f"<td style='color:#777;'>{html_escape(label)}</td>"
-                         f"<td style='color:#222;' align='right'>"
-                         f"{html_escape(value)}</td>"
-                         f"</tr>")
-            html += "</table>"
+            html += theme.rows(rows)
 
         self._equip.setText(html)
         self._equip.setVisible(True)
@@ -356,49 +396,34 @@ class DetectionItemWidget(QWidget):
 
         colour = BAND_COLOURS.get(result["band"], BAND_COLOUR_DEFAULT)
         score = result["score"]
-        filled = max(0.0, min(100.0, score))
 
-        html = (f"<div style='color:{colour};'>"
-                f"<span style='font-size:15px;font-weight:bold;'>⚠ {score:.0f}"
-                f"</span><span style='font-size:11px;'> / 100</span>"
-                f"<span style='font-size:11px;font-weight:bold;'> · "
-                f"{html_escape(result['band'])}</span></div>")
+        html = theme.heading(
+            "threat assessment", theme.TEXT_DIM,
+            trailing=theme.value(f"{score:.0f}", size=theme.SIZE_TITLE,
+                                 colour=colour, bold=True)
+            + theme.value(" / 100", size=theme.SIZE_TINY,
+                          colour=theme.TEXT_MUTED)
+            + "&nbsp;&nbsp;" + theme.chip(result["band"], colour, filled=True))
 
-        # A bar drawn from table cells: QLabel rich text has no progress bar.
-        # Both widths are stated and a zero-width cell is left out entirely —
-        # a 0% cell still claims its content width and fills the bar.
-        cells = ""
-        if filled > 0:
-            cells += (f"<td width='{filled:.0f}%' style='background:{colour};'>"
-                      f"&nbsp;</td>")
-        if filled < 100:
-            cells += (f"<td width='{100 - filled:.0f}%' "
-                      f"style='background:#e0e0e0;'>&nbsp;</td>")
-        html += (f"<table cellspacing='0' cellpadding='0' width='100%' "
-                 f"style='margin:2px 0;'><tr>{cells}</tr></table>")
+        html += theme.bar(score, colour, height=5)
 
-        # What produced the number: the points each factor contributed.
-        rows = ""
+        # Each factor with the weight it carries and the points it earned, so
+        # the figure above can be checked rather than taken on faith.
+        pairs = []
         for factor in result["factors"]:
-            if factor["available"]:
-                value = f"{factor['points']:.1f}"
-                style = "color:#222;"
-            else:
-                value = "n/a"
-                style = "color:#bbb;"
-            rows += (f"<tr><td style='color:#777;'>"
-                     f"{html_escape(factor['label'])}"
-                     f"<span style='color:#aaa;'> ·w{factor['weight']:.0f}</span>"
-                     f"</td><td align='right' style='{style}'>{value}</td></tr>")
-        html += (f"<table cellspacing='0' cellpadding='0' width='100%' "
-                 f"style='font-size:10px;'>{rows}</table>")
+            # The weight rides along with the name: it explains the points
+            # beside it, and belongs to the label rather than the figure.
+            name = f"{factor['label']}  w{factor['weight']:.0f}"
+            pairs.append((name, f"{factor['points']:.1f}"
+                                if factor["available"] else "--"))
+        html += theme.rows(pairs)
 
         missing = result["factors_total"] - result["factors_present"]
         if missing:
-            # Otherwise a low score from thin data reads as a low threat.
-            html += (f"<div style='font-size:10px;color:#C62828;'>"
-                     f"{missing} of {result['factors_total']} factors "
-                     f"unavailable — score is a floor</div>")
+            # A low score from thin data must not read as a low threat.
+            html += theme.note(
+                f"{missing} of {result['factors_total']} factors unavailable "
+                f"&mdash; score is a floor", theme.BAND_COLOURS["MODERATE"])
 
         self._threat.setText(html)
         self._threat.setVisible(True)
@@ -424,18 +449,20 @@ class DetectionItemWidget(QWidget):
 
         if not selected:
             reason = result.get("unavailable_because")
-            html = "<b style='color:#283593;'>🚁 No response drone available</b>"
+            html = theme.heading("response", theme.ACCENT_RESPONSE,
+                                 trailing=theme.chip("none available",
+                                                     theme.TEXT_MUTED))
             if reason:
-                html += (f"<br/><span style='color:#555;'>"
-                         f"{html_escape(str(reason))}</span>")
+                html += theme.note(html_escape(str(reason)), theme.TEXT_DIM)
             for entry in excluded[:4]:
-                html += (f"<br/><span style='color:#999;'>· "
-                         f"{html_escape(str(entry.get('drone_name') or 'drone'))}"
-                         f": {html_escape('; '.join(entry.get('reasons') or []))}"
-                         f"</span>")
+                html += theme.note(
+                    theme.value(html_escape(
+                        str(entry.get("drone_name") or "drone").upper()),
+                                size=theme.SIZE_TINY, colour=theme.TEXT_DIM)
+                    + " &mdash; "
+                    + html_escape("; ".join(entry.get("reasons") or [])))
             if len(excluded) > 4:
-                html += (f"<br/><span style='color:#999;'>· "
-                         f"+{len(excluded) - 4} more ruled out</span>")
+                html += theme.note(f"+{len(excluded) - 4} more ruled out")
             self._drone.setText(html)
             self._drone.setVisible(True)
             self._selected_drone = None
@@ -445,41 +472,44 @@ class DetectionItemWidget(QWidget):
             return
 
         name = selected.get("drone_name") or f"drone {selected.get('drone_id')}"
-        html = f"<b style='color:#283593;'>🚁 {html_escape(str(name))}</b>"
+        html = theme.heading("response", theme.ACCENT_RESPONSE,
+                             trailing=theme.value(
+                                 html_escape(str(name).upper()),
+                                 size=theme.SIZE_SMALL,
+                                 colour=theme.ACCENT_RESPONSE, bold=True))
 
-        bits = []
-        if selected.get("type_of_drone"):
-            bits.append(str(selected["type_of_drone"]))
-        if selected.get("score") is not None:
-            bits.append(f"score {float(selected['score']):.0f}/100")
+        # The figures a dispatch decision turns on, as a column that lines up.
+        facts = []
         if selected.get("eta_min") is not None:
-            bits.append(f"overhead in ~{float(selected['eta_min']):.0f} min")
-        if bits:
-            html += (f"<br/><span style='color:#555;'>"
-                     f"{html_escape(' · '.join(bits))}</span>")
+            facts.append(("eta", f"{float(selected['eta_min']):.0f} min"))
+        if selected.get("distance_km") is not None:
+            facts.append(("range", f"{float(selected['distance_km']):.2f} km"))
+        if selected.get("battery_percentage") is not None:
+            facts.append(("batt", f"{float(selected['battery_percentage']):.0f}%"))
+        if selected.get("score") is not None:
+            facts.append(("score", f"{float(selected['score']):.0f}"))
+        if facts:
+            html += theme.rows(facts)
 
-        for line in (selected.get("why") or [])[:4]:
-            html += (f"<br/><span style='color:#666;'>· "
-                     f"{html_escape(str(line))}</span>")
+        if selected.get("type_of_drone") or selected.get("status"):
+            bits = [str(b).upper() for b in (selected.get("type_of_drone"),
+                                             selected.get("status")) if b]
+            html += theme.note(" · ".join(html_escape(b) for b in bits))
 
         why_best = selected.get("why_best") or []
         if why_best:
-            html += ("<br/><span style='color:#283593;'><b>Why this one:</b>"
-                     "</span>")
+            html += theme.note(theme.label("why this one"))
             for line in why_best[:3]:
-                html += (f"<br/><span style='color:#666;'>· "
-                         f"{html_escape(str(line))}</span>")
+                html += theme.note(html_escape(str(line)), theme.TEXT_DIM)
 
         others = max(0, len(result.get("candidates") or []) - 1)
         tail = []
         if others:
-            tail.append(f"{others} other drone{'' if others == 1 else 's'} "
-                        f"could respond")
+            tail.append(f"{others} other{'' if others == 1 else 's'} able")
         if excluded:
             tail.append(f"{len(excluded)} ruled out")
         if tail:
-            html += (f"<br/><span style='color:#999;'>"
-                     f"{html_escape(' · '.join(tail))}</span>")
+            html += theme.note(" · ".join(tail))
 
         self._drone.setText(html)
         self._drone.setVisible(True)
@@ -489,7 +519,7 @@ class DetectionItemWidget(QWidget):
         self._update_summary()
         if self._authorized_by is None:
             self._authorize_btn.setEnabled(True)
-            self._authorize_btn.setText("Authorize response")
+            self._authorize_btn.setText("AUTHORIZE RESPONSE")
             self._authorize_btn.setVisible(True)
         else:
             # Already authorised: show that rather than offering it again.
@@ -515,12 +545,16 @@ class DetectionItemWidget(QWidget):
         stamp = datetime.now().strftime("%H:%M:%S")
         self._authorize_btn.setEnabled(False)
         self._authorize_btn.setText(
-            f"Authorized by {self._authorized_by} · {stamp}")
-        self._authorize_btn.setStyleSheet("""
-            QPushButton { background: #E8F5E9; color: #1B5E20;
-                          border: 1px solid #A5D6A7; padding: 6px 10px;
-                          border-radius: 3px; font-weight: bold; }
-            QPushButton:disabled { background: #E8F5E9; color: #1B5E20; }
+            f"AUTHORIZED  {self._authorized_by}  {stamp}")
+        self._authorize_btn.setStyleSheet(f"""
+            QPushButton {{ background: transparent; color: {theme.ACCENT_OK};
+                           border: 1px solid {theme.ACCENT_OK};
+                           padding: 6px 10px; border-radius: 2px;
+                           font-family: {theme.FONT_MONO};
+                           font-size: {theme.SIZE_TINY}px;
+                           letter-spacing: 0.6px; }}
+            QPushButton:disabled {{ color: {theme.ACCENT_OK};
+                                    border: 1px solid {theme.ACCENT_OK}; }}
         """)
         self._authorize_btn.setVisible(True)
         self._update_summary()
@@ -557,9 +591,11 @@ class DetectionItemWidget(QWidget):
             }.get(data.get("error_kind"),
                   ("Checkpoint lookup failed", "see the console for details"))
 
-            html = (f"<b style='color:#C62828;'>🛡 {html_escape(headline)}</b>"
-                    f"<br/><span style='color:#777;'>{html_escape(hint)}"
-                    f"</span>")
+            html = theme.heading("checkpoints", theme.ACCENT_CHECKPOINT,
+                                 trailing=theme.chip("lookup failed",
+                                                     theme.ACCENT_ALERT))
+            html += theme.note(html_escape(headline), theme.TEXT_DIM)
+            html += theme.note(html_escape(hint))
             self._checkpoints.setText(html)
             self._checkpoints.setVisible(True)
             return
@@ -567,15 +603,18 @@ class DetectionItemWidget(QWidget):
         checkpoints = data.get("checkpoints") or []
         count = data.get("checkpoint_count", len(checkpoints))
 
-        html = (f"<b style='color:#00695C;'>🛡 {count} checkpoint"
-                f"{'' if count == 1 else 's'} within {radius_km:.2f} km</b>")
-        html += (f"<br/><span style='color:#777;'>range of "
-                 f"{html_escape(str(label))}</span>")
+        html = theme.heading(
+            "checkpoints", theme.ACCENT_CHECKPOINT,
+            trailing=theme.value(str(count), size=theme.SIZE_SMALL,
+                                 colour=theme.ACCENT_CHECKPOINT, bold=True)
+            + theme.value(f" within {radius_km:.2f} km", size=theme.SIZE_TINY,
+                          colour=theme.TEXT_MUTED))
+        html += theme.note(f"range of {html_escape(str(label))}")
 
         if checkpoints:
             html += "<table cellspacing='0' cellpadding='0' width='100%'>"
             for checkpoint in checkpoints[:12]:
-                name = html_escape(checkpoint_name(checkpoint))
+                name = html_escape(checkpoint_name(checkpoint).upper())
                 away = checkpoint_distance_m(checkpoint)
                 away_text = f"{away:,.0f} m" if away is not None else ""
 
@@ -588,16 +627,18 @@ class DetectionItemWidget(QWidget):
                     state = checkpoint.get("status")
                     bits = [str(b) for b in (kind, state) if b]
                     if bits:
-                        detail = (f"<br/><span style='color:#999;'>&nbsp;&nbsp;"
-                                  f"{html_escape(' · '.join(bits))}</span>")
+                        detail = ("<br/>" + theme.label(
+                            " · ".join(html_escape(b) for b in bits)))
 
-                html += (f"<tr><td style='color:#222;'>• {name}{detail}</td>"
-                         f"<td style='color:#777;' align='right' "
-                         f"valign='top'>{away_text}</td></tr>")
+                html += (f"<tr><td>"
+                         f"{theme.value(name, size=theme.SIZE_TINY, colour=theme.TEXT)}"
+                         f"{detail}</td>"
+                         f"<td align='right' valign='top'>"
+                         f"{theme.value(away_text, size=theme.SIZE_TINY, colour=theme.TEXT_DIM)}"
+                         f"</td></tr>")
             html += "</table>"
             if len(checkpoints) > 12:
-                html += (f"<span style='color:#777;'>+ "
-                         f"{len(checkpoints) - 12} more</span>")
+                html += theme.note(f"+{len(checkpoints) - 12} more")
 
         self._checkpoints.setText(html)
         self._checkpoints.setVisible(True)
@@ -656,33 +697,39 @@ class DetectionPanel(QWidget):
     def _init_ui(self):
         layout = QVBoxLayout(self)
 
-        header = QGroupBox("Detected Objects")
+        header = QGroupBox("DETECTIONS")
         header_layout = QHBoxLayout()
 
-        self.count_label = QLabel("0 detections")
-        self.count_label.setStyleSheet("font-weight: bold; color: #2196F3;")
+        self.count_label = QLabel()
+        self.count_label.setTextFormat(Qt.TextFormat.RichText)
+        self._set_count(0)
         header_layout.addWidget(self.count_label)
         header_layout.addStretch()
 
-        self._expand_btn = QPushButton("Expand all")
+        self._expand_btn = QPushButton("EXPAND ALL")
         self._expand_btn.setCheckable(True)
-        self._expand_btn.setStyleSheet("""
-            QPushButton { background: #eceff1; color: #333; border: 1px solid #cfd8dc;
-                          padding: 5px 10px; border-radius: 3px; }
-            QPushButton:hover { background: #cfd8dc; }
-            QPushButton:checked { background: #cfd8dc; }
+        self._expand_btn.setStyleSheet(f"""
+            QPushButton {{ background: transparent; color: {theme.TEXT_DIM};
+                           border: 1px solid {theme.BORDER_STRONG};
+                           padding: 5px 9px; border-radius: 2px;
+                           font-size: {theme.SIZE_TINY}px; letter-spacing: 0.8px; }}
+            QPushButton:hover {{ color: {theme.TEXT};
+                                 border: 1px solid {theme.TEXT_MUTED}; }}
+            QPushButton:checked {{ color: {theme.TEXT};
+                                   background: {theme.SURFACE_HOVER}; }}
         """)
         self._expand_btn.toggled.connect(self._on_expand_all)
         header_layout.addWidget(self._expand_btn)
 
-        clear_btn = QPushButton("Clear All")
+        clear_btn = QPushButton("CLEAR")
         clear_btn.clicked.connect(self.clear_detections)
-        clear_btn.setStyleSheet("""
-            QPushButton {
-                background: #f44336; color: white; border: none;
-                padding: 5px 10px; border-radius: 3px;
-            }
-            QPushButton:hover { background: #d32f2f; }
+        clear_btn.setStyleSheet(f"""
+            QPushButton {{ background: transparent; color: {theme.TEXT_MUTED};
+                           border: 1px solid {theme.BORDER_STRONG};
+                           padding: 5px 9px; border-radius: 2px;
+                           font-size: {theme.SIZE_TINY}px; letter-spacing: 0.8px; }}
+            QPushButton:hover {{ color: {theme.ACCENT_ALERT};
+                                 border: 1px solid {theme.ACCENT_ALERT}; }}
         """)
         header_layout.addWidget(clear_btn)
         header.setLayout(header_layout)
@@ -716,8 +763,7 @@ class DetectionPanel(QWidget):
         self.detections.append(detection_data)
         self.list_layout.insertWidget(0, item)   # newest first
 
-        n = len(self._items)
-        self.count_label.setText(f"{n} detection{'s' if n != 1 else ''}")
+        self._set_count(len(self._items))
 
     def set_checkpoints(self, key, data):
         """Route a /nearby result to the detection item it belongs to."""
@@ -725,9 +771,16 @@ class DetectionPanel(QWidget):
         if item is not None:
             item.set_checkpoints(data)
 
+    def _set_count(self, n):
+        """The tally, with the number carrying the weight rather than the word."""
+        self.count_label.setText(
+            theme.value(f"{n:02d}", size=theme.SIZE_TITLE,
+                        colour=theme.TEXT, bold=True)
+            + "&nbsp;" + theme.label("tracked"))
+
     def _on_expand_all(self, expanded):
         """Open or close every item at once."""
-        self._expand_btn.setText("Collapse all" if expanded else "Expand all")
+        self._expand_btn.setText("COLLAPSE ALL" if expanded else "EXPAND ALL")
         for item in self._items.values():
             item.set_expanded(expanded)
 
@@ -745,4 +798,4 @@ class DetectionPanel(QWidget):
             item = self.list_layout.takeAt(0)
             if item.widget():
                 item.widget().deleteLater()
-        self.count_label.setText("0 detections")
+        self._set_count(0)
