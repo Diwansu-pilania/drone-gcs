@@ -14,6 +14,8 @@ Pure HTTP + parsing, with no Qt or UI dependency, so it can be called from a
 worker thread and exercised on its own.
 """
 
+from urllib.parse import urlencode
+
 import requests
 
 # Detector payloads carry the equipment's reach in kilometres; the service
@@ -92,6 +94,10 @@ def fetch_nearby_checkpoints(api_base, latitude, longitude, radius_m,
         "longitude": longitude,
         "radius_m": radius_m,
     }
+
+    # Logged before sending so an unanswered request is still visible: without
+    # this a wrong address looks identical to the lookup never firing.
+    print(f"[checkpoints] GET {url}?{urlencode(params)}")
 
     try:
         response = requests.get(url, params=params, timeout=timeout)

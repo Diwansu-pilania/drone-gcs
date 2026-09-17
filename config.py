@@ -106,11 +106,14 @@ TILE_CACHE_DIR = "map_tiles"
 # The GCS asks an external service which checkpoints lie near a detected
 # object: GET <base>/nearby?latitude=..&longitude=..&radius_m=..
 #
-# The service runs on a Tailscale/LAN peer, so set this to that peer's address
-# (Tailscale IP or MagicDNS name), e.g. "http://100.101.102.103:8000" or
-# "http://my-peer.tail-scale.ts.net:8000". Leave it empty to switch the lookup
-# off — detections are still mapped, just without checkpoints.
-CHECKPOINT_API_BASE = ""
+# The service runs on a Tailscale/LAN peer. Leave this empty to switch the
+# lookup off — detections are still mapped, just without checkpoints.
+#
+# NOTE: the port below is uvicorn's default (8000) and is a guess — only the
+# peer's address was known. If the checkpoint service listens elsewhere,
+# change it here. A wrong port shows up as a logged connection error per
+# detection, not a crash.
+CHECKPOINT_API_BASE = "http://100.111.81.89:8000"
 
 # Seconds to wait for the checkpoint service before giving up. The request runs
 # off the Qt thread, so a slow peer delays checkpoints but never the UI.
