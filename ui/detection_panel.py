@@ -14,6 +14,21 @@ from core.checkpoint_client import (checkpoint_distance_m, checkpoint_name)
 from core.threat_score import score_detection
 
 
+class ClickableWidget(QWidget):
+    """A plain widget that reports a click.
+
+    The whole header row is the toggle: a small chevron alone would be a
+    needlessly precise target in a narrow panel.
+    """
+
+    clicked = pyqtSignal()
+
+    def mouseReleaseEvent(self, event):
+        if event.button() == Qt.MouseButton.LeftButton:
+            self.clicked.emit()
+        super().mouseReleaseEvent(event)
+
+
 BAND_COLOURS = {
     "CRITICAL": "#C62828",
     "HIGH": "#EF6C00",
@@ -81,6 +96,12 @@ class DetectionItemWidget(QWidget):
         self._loaded_image_url = None
         self._selected_drone = None
         self._authorized_by = None
+        self._expanded = False
+        # What the closed row shows, kept as values rather than parsed back
+        # out of the rich text below.
+        self._threat_summary = None
+        self._drone_summary = None
+        self._checkpoint_summary = None
         self._init_ui()
         self.set_data(detection)
         self.setStyleSheet("""
@@ -96,13 +117,20 @@ class DetectionItemWidget(QWidget):
         """)
 
     def _init_ui(self):
-        # Thumbnail + core facts on one row, with the equipment and checkpoint
-        # blocks stacked underneath so neither is squeezed by the narrow panel.
+        # Two parts: a header that is always visible, and the detail below it
+        # that collapses. Every detection carries a threat score, equipment,
+        # a response drone and its checkpoints, which is far too much to show
+        # for all of them at once in a narrow panel — so the header carries
+        # the summary and the rest opens on a click.
         outer = QVBoxLayout(self)
         outer.setContentsMargins(5, 5, 5, 5)
         outer.setSpacing(3)
 
-        row = QHBoxLayout()
+        self._header = ClickableWidget()
+        self._header.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._header.clicked.connect(self.toggle)
+        row = QHBoxLayout(self._header)
+        row.setContentsMargins(0, 0, 0, 0)
 
         self._thumb = QLabel()
         self._thumb.setFixedSize(80, 60)
@@ -117,10 +145,31 @@ class DetectionItemWidget(QWidget):
         self._pos = QLabel();   self._pos.setStyleSheet("font-size: 11px; color: #666;")
         self._alt = QLabel();   self._alt.setStyleSheet("font-size: 11px; color: #666;")
         self._time = QLabel();  self._time.setStyleSheet("font-size: 11px; color: #999;")
-        for w in (self._title, self._dist, self._pos, self._alt, self._time):
+        # The at-a-glance line: what the detail would have said, in one row.
+        self._summary = QLabel()
+        self._summary.setTextFormat(Qt.TextFormat.RichText)
+        self._summary.setStyleSheet("font-size: 11px;")
+        for w in (self._title, self._summary, self._dist, self._pos, self._alt,
+                  self._time):
             info.addWidget(w)
         row.addLayout(info, 1)
-        outer.addLayout(row)
+
+        # Which way this item is about to move, at the right of the header.
+        self._chevron = QLabel("▸")
+        self._chevron.setStyleSheet("font-size: 14px; color: #888;")
+        self._chevron.setAlignment(Qt.AlignmentFlag.AlignTop
+                                   | Qt.AlignmentFlag.AlignRight)
+        self._chevron.setFixedWidth(14)
+        row.addWidget(self._chevron)
+
+        outer.addWidget(self._header)
+
+        # Everything below lives in the collapsing half.
+        self._details = QWidget()
+        outer_details = QVBoxLayout(self._details)
+        outer_details.setContentsMargins(0, 0, 0, 0)
+        outer_details.setSpacing(3)
+        outer = outer_details          # the blocks below go into the details
 
         # Threat score: the headline for this detection, so it goes first.
         self._threat = QLabel()
@@ -173,6 +222,52 @@ class DetectionItemWidget(QWidget):
             "padding: 4px 6px;")
         self._checkpoints.setVisible(False)
         outer.addWidget(self._checkpoints)
+
+        # Collapsed to begin with: the panel is a list to scan, and an
+        # expanded item per detection defeats that.
+        self._details.setVisible(False)
+        self.layout().addWidget(self._details)
+
+    def _update_summary(self):
+        """Rebuild the one-line summary shown while this item is closed.
+
+        Collapsing is only worth doing if the closed row still answers "does
+        this need me?" — so the threat, the chosen drone and the checkpoint
+        count are carried up here, and the detail below repeats them in full.
+        """
+        parts = []
+
+        if self._threat_summary:
+            score, band = self._threat_summary
+            colour = BAND_COLOURS.get(band, BAND_COLOUR_DEFAULT)
+            parts.append(f"<span style='color:{colour};font-weight:bold;'>"
+                         f"⚠ {score:.0f}</span>"
+                         f"<span style='color:#888;'>/100</span>")
+
+        if self._drone_summary:
+            parts.append(f"<span style='color:#3949AB;'>🚁 "
+                         f"{html_escape(self._drone_summary)}</span>")
+
+        if self._checkpoint_summary is not None:
+            parts.append(f"<span style='color:#00695C;'>🛡 "
+                         f"{self._checkpoint_summary}</span>")
+
+        if self._authorized_by:
+            parts.append("<span style='color:#2E7D32;'>✔ authorized</span>")
+
+        self._summary.setText(" · ".join(parts))
+        self._summary.setVisible(bool(parts) and not self._expanded)
+
+    def toggle(self):
+        """Open or close this detection's detail."""
+        self.set_expanded(not self._expanded)
+
+    def set_expanded(self, expanded):
+        """Show or hide the detail, and point the chevron accordingly."""
+        self._expanded = bool(expanded)
+        self._details.setVisible(self._expanded)
+        self._chevron.setText("▾" if self._expanded else "▸")
+        self._update_summary()
 
     def set_data(self, det):
         """Populate/refresh all fields from a (possibly merged) detection dict."""
@@ -307,6 +402,8 @@ class DetectionItemWidget(QWidget):
 
         self._threat.setText(html)
         self._threat.setVisible(True)
+        self._threat_summary = (score, result["band"])
+        self._update_summary()
 
     def set_response_drone(self, result):
         """Show the drone chosen to respond to this object, and why.
@@ -343,6 +440,8 @@ class DetectionItemWidget(QWidget):
             self._drone.setVisible(True)
             self._selected_drone = None
             self._authorize_btn.setVisible(False)
+            self._drone_summary = None
+            self._update_summary()
             return
 
         name = selected.get("drone_name") or f"drone {selected.get('drone_id')}"
@@ -386,6 +485,8 @@ class DetectionItemWidget(QWidget):
         self._drone.setVisible(True)
 
         self._selected_drone = selected
+        self._drone_summary = selected.get("drone_name")
+        self._update_summary()
         if self._authorized_by is None:
             self._authorize_btn.setEnabled(True)
             self._authorize_btn.setText("Authorize response")
@@ -422,6 +523,7 @@ class DetectionItemWidget(QWidget):
             QPushButton:disabled { background: #E8F5E9; color: #1B5E20; }
         """)
         self._authorize_btn.setVisible(True)
+        self._update_summary()
 
     def set_checkpoints(self, data):
         """Show the /nearby result for this detection.
@@ -499,6 +601,8 @@ class DetectionItemWidget(QWidget):
 
         self._checkpoints.setText(html)
         self._checkpoints.setVisible(True)
+        self._checkpoint_summary = count
+        self._update_summary()
 
         # Checkpoints carry weight in the score, so fold the result into the
         # detection and re-score now that the count is known.
@@ -560,6 +664,17 @@ class DetectionPanel(QWidget):
         header_layout.addWidget(self.count_label)
         header_layout.addStretch()
 
+        self._expand_btn = QPushButton("Expand all")
+        self._expand_btn.setCheckable(True)
+        self._expand_btn.setStyleSheet("""
+            QPushButton { background: #eceff1; color: #333; border: 1px solid #cfd8dc;
+                          padding: 5px 10px; border-radius: 3px; }
+            QPushButton:hover { background: #cfd8dc; }
+            QPushButton:checked { background: #cfd8dc; }
+        """)
+        self._expand_btn.toggled.connect(self._on_expand_all)
+        header_layout.addWidget(self._expand_btn)
+
         clear_btn = QPushButton("Clear All")
         clear_btn.clicked.connect(self.clear_detections)
         clear_btn.setStyleSheet("""
@@ -595,6 +710,8 @@ class DetectionPanel(QWidget):
 
         item = DetectionItemWidget(detection_data)
         item.response_authorized.connect(self.response_authorized)
+        if self._expand_btn.isChecked():
+            item.set_expanded(True)
         self._items[key] = item
         self.detections.append(detection_data)
         self.list_layout.insertWidget(0, item)   # newest first
@@ -607,6 +724,12 @@ class DetectionPanel(QWidget):
         item = self._items.get(key)
         if item is not None:
             item.set_checkpoints(data)
+
+    def _on_expand_all(self, expanded):
+        """Open or close every item at once."""
+        self._expand_btn.setText("Collapse all" if expanded else "Expand all")
+        for item in self._items.values():
+            item.set_expanded(expanded)
 
     def set_response_drone(self, key, result):
         """Route a chosen response drone to its detection item."""
