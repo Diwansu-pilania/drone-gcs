@@ -11,7 +11,9 @@ from core.vehicle_state import VehicleState
 from core.mavlink_thread import MAVLinkThread
 from core.detection_server import DetectionServer
 from core.detection_flow import prepare_detection_for_map
-from core.checkpoint_client import (checkpoints_from_response,
+from core.checkpoint_client import (checkpoint_name,
+                                    checkpoint_position,
+                                    checkpoints_from_response,
                                     equipment_max_range_km,
                                     fetch_nearby_checkpoints,
                                     radius_from_equipment)
@@ -392,19 +394,36 @@ class MainWindow(QMainWindow):
         def run():
             payload = fetch_nearby_checkpoints(
                 api_base, latitude, longitude, radius_m, timeout=timeout)
-            if payload is None:
-                return
             result = dict(request)
-            result["checkpoints"] = checkpoints_from_response(payload)
-            result["checkpoint_count"] = payload.get(
-                "checkpoint_count", len(result["checkpoints"]))
+            if payload is None:
+                # Still emit, so the panel can say the lookup failed rather
+                # than leaving the operator staring at nothing.
+                result["failed"] = True
+                result["checkpoints"] = []
+                result["checkpoint_count"] = 0
+            else:
+                result["checkpoints"] = checkpoints_from_response(payload)
+                result["checkpoint_count"] = payload.get(
+                    "checkpoint_count", len(result["checkpoints"]))
             self.checkpoints_ready.emit(result)
 
         threading.Thread(target=run, daemon=True).start()
 
     @pyqtSlot(dict)
     def _on_checkpoints_ready(self, data):
-        """Draw and log the checkpoints found near a detected object."""
+        """Show the checkpoints found near a detected object.
+
+        The list goes to the side panel, where it is readable regardless of
+        how the service names its coordinate fields; the map gets the circle
+        and markers for the ones that carry a usable position.
+        """
+        self.detection_panel.set_checkpoints(data.get("key"), data)
+
+        if data.get("failed"):
+            label = data.get("equipment_name") or data.get("object_class")
+            self.statusBar().showMessage(f"{label}: checkpoint lookup failed")
+            return
+
         self.map_widget.add_checkpoints(data)
 
         checkpoints = data.get("checkpoints") or []
@@ -418,10 +437,22 @@ class MainWindow(QMainWindow):
         print(f"[checkpoints] {label}: {count} within {radius_km:.2f} km "
               f"({origin}) of "
               f"{center.get('latitude')}, {center.get('longitude')}")
+
+        mappable = 0
         for checkpoint in checkpoints:
-            if isinstance(checkpoint, dict):
-                print(f"[checkpoints]   - "
-                      f"{checkpoint.get('name') or checkpoint.get('id')}")
+            lat, lon = checkpoint_position(checkpoint)
+            if lat is not None and lon is not None:
+                mappable += 1
+                where = f"{lat:.6f}, {lon:.6f}"
+            else:
+                where = "no usable coordinates - not mapped"
+            print(f"[checkpoints]   - {checkpoint_name(checkpoint)} ({where})")
+
+        if checkpoints and not mappable:
+            # They are listed in the panel; say why the map stayed empty.
+            print("[checkpoints] none of the checkpoints carried coordinates "
+                  "this build recognises, so no markers were drawn - the raw "
+                  "reply is logged above")
 
         self.statusBar().showMessage(
             f"{label}: {count} checkpoint(s) within {radius_km:.2f} km"

@@ -19,13 +19,6 @@
         .checkpoint-popup strong { color: #00897B; font-size: 14px; }
         .checkpoint-popup .info-row { margin: 3px 0; }
         .checkpoint-popup .muted { color: #666; font-size: 12px; }
-        .equipment-block { margin: 6px 0; padding: 6px 8px; border-left: 3px solid #FF9800;
-                           background: #FFF8E1; border-radius: 3px; }
-        .equipment-block .equipment-title { font-weight: bold; color: #E65100; }
-        .equipment-block .equipment-grid { display: grid; grid-template-columns: auto 1fr;
-                                           gap: 1px 8px; margin-top: 3px; font-size: 12px; }
-        .equipment-block .equipment-label { color: #666; white-space: nowrap; }
-        .equipment-block .equipment-value { color: #222; }
     </style>
 </head>
 <body>
@@ -231,64 +224,6 @@
             img.src = imageUrl;
         }
 
-        // Render the detector's equipment_info block for a detection popup.
-        // Known fields are shown first, in a deliberate order with their
-        // units; anything else the detector adds later is still listed rather
-        // than silently dropped, so new metadata needs no change here.
-        var EQUIPMENT_FIELDS = [
-            ['category', 'Category', ''],
-            ['domain', 'Domain', ''],
-            ['mobility_type', 'Mobility', ''],
-            ['caliber_mm', 'Caliber', ' mm'],
-            ['max_range_km', 'Max range', ' km'],
-            ['pp_kg', 'PP', ' kg'],
-            ['score', 'Score', '']
-        ];
-
-        function prettyFieldName(key) {
-            return String(key).replace(/_/g, ' ')
-                .replace(/^./, function(c) { return c.toUpperCase(); });
-        }
-
-        function equipmentInfoHtml(info) {
-            if (!info || typeof info !== 'object' || Array.isArray(info)) { return ''; }
-
-            var shown = {name: true};
-            var rows = '';
-
-            EQUIPMENT_FIELDS.forEach(function(field) {
-                var key = field[0], label = field[1], unit = field[2];
-                shown[key] = true;
-                var value = info[key];
-                if (value === null || value === undefined || value === '') { return; }
-                rows += '<div class="equipment-label">' + escapeHtml(label) + '</div>' +
-                        '<div class="equipment-value">' + escapeHtml(value) +
-                        escapeHtml(unit) + '</div>';
-            });
-
-            // Any field the detector starts sending that is not listed above.
-            Object.keys(info).forEach(function(key) {
-                if (shown[key]) { return; }
-                var value = info[key];
-                if (value === null || value === undefined || value === '') { return; }
-                if (typeof value === 'object') { return; }
-                rows += '<div class="equipment-label">' + escapeHtml(prettyFieldName(key)) +
-                        '</div><div class="equipment-value">' + escapeHtml(value) + '</div>';
-            });
-
-            var name = info.name;
-            if (!rows && (name === null || name === undefined || name === '')) { return ''; }
-
-            var html = '<div class="equipment-block">';
-            html += '<div class="equipment-title">🛠 ' +
-                    escapeHtml(name || 'Equipment') + '</div>';
-            if (rows) {
-                html += '<div class="equipment-grid">' + rows + '</div>';
-            }
-            html += '</div>';
-            return html;
-        }
-
         // Add detection marker from Qt
         window.addDetection = function(detectionData) {
             var lat = detectionData.latitude;
@@ -304,7 +239,6 @@
             var syncTimeDiff = detectionData.sync_time_diff;
             var groundDistance = detectionData.ground_distance;
             var positionSource = detectionData.position_source;
-            var equipmentInfo = detectionData.equipment_info;
             var droneLat = detectionData.drone_lat;
             var droneLon = detectionData.drone_lon;
             var droneAlt = detectionData.drone_alt;
@@ -350,10 +284,6 @@
 
             popupContent += '<div class="info">';
             popupContent += '<div class="info-row"><strong>' + objectClass + '</strong> (' + (confidence * 100).toFixed(1) + '%)</div>';
-
-            // What the object IS, straight from the detector, before the
-            // where/how-far geometry below.
-            popupContent += equipmentInfoHtml(equipmentInfo);
 
             var timeStr = timestamp ? new Date(timestamp).toLocaleString() : 'Unknown';
             popupContent += '<div class="info-row">📅 Time: ' + timeStr + '</div>';
@@ -446,16 +376,39 @@
 
         // Pull a latitude/longitude out of a checkpoint however the service
         // happens to name them.
-        function checkpointLatLng(cp) {
-            var lat = cp.latitude != null ? cp.latitude
-                    : (cp.lat != null ? cp.lat : null);
-            var lon = cp.longitude != null ? cp.longitude
-                    : (cp.lon != null ? cp.lon
-                    : (cp.lng != null ? cp.lng : null));
-            if (lat == null || lon == null) { return null; }
-            lat = Number(lat); lon = Number(lon);
-            if (isNaN(lat) || isNaN(lon)) { return null; }
-            return [lat, lon];
+        var CP_LATLON_KEYS = [['latitude', 'longitude'], ['lat', 'lon'],
+                              ['lat', 'lng'], ['y', 'x']];
+        var CP_NESTED_KEYS = ['location', 'position', 'coords', 'coordinates', 'point'];
+
+        function checkpointLatLng(cp, depth) {
+            depth = depth || 0;
+            if (cp == null || depth > 3) { return null; }
+
+            // A bare [lat, lon] pair.
+            if (Array.isArray(cp)) {
+                if (cp.length < 2) { return null; }
+                var a = Number(cp[0]), b = Number(cp[1]);
+                return (isNaN(a) || isNaN(b)) ? null : [a, b];
+            }
+            if (typeof cp !== 'object') { return null; }
+
+            for (var i = 0; i < CP_LATLON_KEYS.length; i++) {
+                var latKey = CP_LATLON_KEYS[i][0], lonKey = CP_LATLON_KEYS[i][1];
+                if (cp[latKey] != null && cp[lonKey] != null) {
+                    var lat = Number(cp[latKey]), lon = Number(cp[lonKey]);
+                    return (isNaN(lat) || isNaN(lon)) ? null : [lat, lon];
+                }
+            }
+
+            // A nested position object or pair.
+            for (var j = 0; j < CP_NESTED_KEYS.length; j++) {
+                var nested = cp[CP_NESTED_KEYS[j]];
+                if (nested != null) {
+                    var found = checkpointLatLng(nested, depth + 1);
+                    if (found) { return found; }
+                }
+            }
+            return null;
         }
 
         // Draw one detection's checkpoint set: the search radius as a circle,
@@ -516,11 +469,17 @@
                         escapeHtml(name) + '</strong></div>';
 
                 // Whatever the service labels the separation, show it.
-                var away = cp.distance_m != null ? cp.distance_m
-                         : (cp.distance != null ? cp.distance : null);
-                if (away != null && !isNaN(Number(away))) {
+                var away = null, awayKeys = ['distance_m', 'distance',
+                                            'distance_meters', 'dist_m'];
+                for (var ai = 0; ai < awayKeys.length; ai++) {
+                    if (cp[awayKeys[ai]] != null) { away = Number(cp[awayKeys[ai]]); break; }
+                }
+                if (away == null && cp.distance_km != null) {
+                    away = Number(cp.distance_km) * 1000;
+                }
+                if (away != null && !isNaN(away)) {
                     html += '<div class="info-row">📏 ' +
-                            Number(away).toFixed(0) + ' m from object</div>';
+                            away.toFixed(0) + ' m from object</div>';
                 }
                 if (cp.type || cp.category) {
                     html += '<div class="info-row">🏷 ' +

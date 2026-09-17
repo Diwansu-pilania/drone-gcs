@@ -14,6 +14,7 @@ Pure HTTP + parsing, with no Qt or UI dependency, so it can be called from a
 worker thread and exercised on its own.
 """
 
+import json
 from urllib.parse import urlencode
 
 import requests
@@ -112,7 +113,77 @@ def fetch_nearby_checkpoints(api_base, latitude, longitude, radius_m,
               f"expected an object")
         return None
 
+    # The raw reply, trimmed. The service's field names are not fixed by
+    # anything on this side, so when checkpoints come back but nothing
+    # appears, this is what says why.
+    body = json.dumps(payload)
+    print(f"[checkpoints] <- {body[:600]}{'...' if len(body) > 600 else ''}")
+
     return payload
+
+
+def checkpoint_position(checkpoint):
+    """Return a checkpoint's (lat, lon), or ``(None, None)``.
+
+    The service names these fields as it likes, so accept the usual spellings
+    and the common nested/pair shapes rather than silently plotting nothing.
+    """
+    if not isinstance(checkpoint, dict):
+        # A bare [lat, lon] pair.
+        if isinstance(checkpoint, (list, tuple)) and len(checkpoint) >= 2:
+            try:
+                return float(checkpoint[0]), float(checkpoint[1])
+            except (TypeError, ValueError):
+                return None, None
+        return None, None
+
+    for lat_key, lon_key in (("latitude", "longitude"), ("lat", "lon"),
+                             ("lat", "lng"), ("y", "x")):
+        if lat_key in checkpoint and lon_key in checkpoint:
+            try:
+                return float(checkpoint[lat_key]), float(checkpoint[lon_key])
+            except (TypeError, ValueError):
+                return None, None
+
+    # A nested position object or pair.
+    for key in ("location", "position", "coords", "coordinates", "point"):
+        nested = checkpoint.get(key)
+        if nested is not None and nested is not checkpoint:
+            return checkpoint_position(nested)
+
+    return None, None
+
+
+def checkpoint_name(checkpoint):
+    """Return something printable to identify a checkpoint."""
+    if not isinstance(checkpoint, dict):
+        return "Checkpoint"
+    for key in ("name", "title", "checkpoint_name", "label", "id"):
+        value = checkpoint.get(key)
+        if value is not None and value != "":
+            return str(value)
+    return "Checkpoint"
+
+
+def checkpoint_distance_m(checkpoint):
+    """Return a checkpoint's reported distance in metres, else ``None``."""
+    if not isinstance(checkpoint, dict):
+        return None
+    for key in ("distance_m", "distance", "distance_meters", "dist_m"):
+        value = checkpoint.get(key)
+        if value is not None:
+            try:
+                return float(value)
+            except (TypeError, ValueError):
+                return None
+    for key in ("distance_km", "dist_km"):
+        value = checkpoint.get(key)
+        if value is not None:
+            try:
+                return float(value) * METRES_PER_KM
+            except (TypeError, ValueError):
+                return None
+    return None
 
 
 def checkpoints_from_response(payload):
@@ -124,4 +195,9 @@ def checkpoints_from_response(payload):
     if not isinstance(payload, dict):
         return []
     checkpoints = payload.get("checkpoints")
-    return checkpoints if isinstance(checkpoints, list) else []
+    if isinstance(checkpoints, list):
+        return checkpoints
+    # Some services key the set by id instead of listing it.
+    if isinstance(checkpoints, dict):
+        return list(checkpoints.values())
+    return []
