@@ -11,11 +11,11 @@ A detection arrives as TWO POSTs from the detector (see the FastAPI client):
 Both carry the same `image_file` (and `timestamp`), so this server MERGES them
 into ONE record keyed by `image_file` (falling back to `timestamp`). The record
 keeps a single stable `id` across both POSTs - it is NOT re-numbered, and it is
-independent of the detector's `track_id`.
+independent of the detector's own tracker id.
 
   JSON payload:
   {
-    "track_id": 1,
+    "tracker_id": 1,                    # `track_id` is also accepted
     "class": "car",
     "confidence": 0.4044,
     "bbox": {"x1": 506, "y1": 1541, "x2": 557, "y2": 1600},
@@ -216,6 +216,20 @@ class DetectionServer(QObject):
     # Merge (correlate the initial + depth POSTs of one detection)
     # ------------------------------------------------------------------ #
     @staticmethod
+    def _track_id(data):
+        """Return the detector's tracker id, under either spelling it uses.
+
+        Current payloads name it ``tracker_id``; earlier ones (and
+        mock_detector) send ``track_id``. Tested against None rather than
+        truthiness so a legitimate id of 0 is not discarded.
+        """
+        for field in ("track_id", "tracker_id"):
+            value = data.get(field)
+            if value is not None:
+                return value
+        return None
+
+    @staticmethod
     def _merge_key(data, image_name):
         """Stable key correlating a detection's POSTs: image_file, else timestamp."""
         if image_name:
@@ -293,7 +307,7 @@ class DetectionServer(QObject):
 
         return {
             "id": None,
-            "track_id": data.get("track_id"),
+            "track_id": self._track_id(data),
             "object_class": obj_class,
             "class": obj_class,
             "confidence": self._to_float(data.get("confidence"), 0.0),
