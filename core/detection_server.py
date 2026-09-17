@@ -332,6 +332,40 @@ class DetectionServer(QObject):
     # ------------------------------------------------------------------ #
     # Persistence
     # ------------------------------------------------------------------ #
+    def update_record(self, detection, fields):
+        """Merge ``fields`` into a stored detection and rewrite its JSON.
+
+        The UI is handed a copy of each record, so anything it works out
+        afterwards — the projected object position, then the checkpoints near
+        it — lives only in that copy unless it is written back. Both are
+        derived after the POSTs have been stored, so the record is updated in
+        place rather than waiting for a further POST that may never arrive.
+
+        ``detection`` is the dict the UI holds; its merge key is derived here
+        so callers need not know how records are keyed.
+
+        Returns the updated record, or ``None`` when no stored detection
+        matches (it was cleared, or never merged).
+        """
+        if not fields:
+            return None
+
+        key = self._merge_key(detection, detection.get("image_file"))
+        with self._merge_lock:
+            record = self._index.get(key) if key is not None else None
+            if record is None:
+                return None
+            record.update(fields)
+
+        # Outside the merge lock: _persist takes the file lock, and holding
+        # both would put a disk write in the path of every incoming POST.
+        self._persist(record, key)
+        return record
+
+    def attach_checkpoints(self, detection, checkpoints):
+        """Record a /nearby result on a detection's JSON under one key."""
+        return self.update_record(detection, {"nearby_checkpoints": checkpoints})
+
     def _persist(self, detection, key):
         """Write the merged per-detection JSON file + append to the event log."""
         stem = secure_filename(os.path.splitext(key or "")[0]) if key else ""
